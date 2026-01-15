@@ -17,6 +17,13 @@ const bodyParser = require('body-parser');
 const mongoose = require('mongoose');
 const cors = require('cors');
 
+// Import routes
+const agentRoutes = require('./routes/agents');
+const voiceRoutes = require('./routes/voices');
+const fileRoutes = require('./routes/files');
+const phoneNumberRoutes = require('./routes/phone-numbers');
+const credentialRoutes = require('./routes/credentials');
+
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-telecaller')
   .then(() => console.log('MongoDB connected'))
@@ -54,7 +61,10 @@ const callSchema = new mongoose.Schema({
     callSid: String,
     provider: String,
     accountSid: String
-  }
+  },
+  // Agent tracking
+  agentId: String, // Reference to Agent._id
+  agentName: String // Agent name at time of call
 }, { _id: false, timestamps: true });
 
 const Call = mongoose.model('Call', callSchema);
@@ -62,6 +72,13 @@ const Call = mongoose.model('Call', callSchema);
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+
+// Mount agent routes
+app.use('/vapi/agents', agentRoutes);
+app.use('/vapi/voices', voiceRoutes);
+app.use('/vapi/files', fileRoutes);
+app.use('/vapi/phone-numbers', phoneNumberRoutes);
+app.use('/vapi/credentials', credentialRoutes);
 
 const VAPI_KEY = process.env.VAPI_KEY;
 if (!VAPI_KEY) {
@@ -72,11 +89,37 @@ const BASE = 'https://api.vapi.ai';
 
 app.post('/outbound-call', async (req, res) => {
   try {
-    const { to } = req.body;
+    const { to, agentId } = req.body;
     if (!to) return res.status(400).json({ error: 'missing "to" phone number' });
 
+    let assistantId = process.env.VAPI_ASSISTANT_ID;
+    let agentName = 'Default Agent';
+    let agentDbId = null;
+
+    // If custom agent is specified, use it
+    if (agentId) {
+      const Agent = require('./models/Agent');
+      const agent = await Agent.findById(agentId);
+
+      if (!agent) {
+        return res.status(404).json({ error: 'Agent not found' });
+      }
+
+      if (agent.status !== 'active') {
+        return res.status(400).json({ error: 'Agent is not active' });
+      }
+
+      assistantId = agent.vapiAssistantId;
+      agentName = agent.name;
+      agentDbId = agent._id;
+
+      console.log(`Using custom agent: ${agentName} (${assistantId})`);
+    } else {
+      console.log('Using default agent from environment');
+    }
+
     const payload = {
-      assistantId: process.env.VAPI_ASSISTANT_ID,
+      assistantId: assistantId,
       phoneNumberId: process.env.VAPI_PHONE_ID,
       customer: { number: to }
     };
@@ -88,9 +131,23 @@ app.post('/outbound-call', async (req, res) => {
       }
     });
 
-    // Save to MongoDB
-    const call = new Call(r.data);
+    // Save to MongoDB with agent info
+    const callData = r.data;
+    callData.agentId = agentDbId;
+    callData.agentName = agentName;
+
+    const call = new Call(callData);
     await call.save();
+
+    // Update agent statistics if custom agent was used
+    if (agentDbId) {
+      const Agent = require('./models/Agent');
+      const agent = await Agent.findById(agentDbId);
+      if (agent) {
+        agent.statistics.lastUsed = new Date();
+        await agent.save();
+      }
+    }
 
     return res.status(200).json(r.data);
   } catch (err) {
