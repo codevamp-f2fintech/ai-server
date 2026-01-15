@@ -25,9 +25,13 @@ router.post('/', async (req, res) => {
             });
         }
 
+        // Create a VAPI-specific config object by removing internal fields
+        const vapiConfig = { ...config };
+        delete vapiConfig.status;
+
         // Create assistant in VAPI
         console.log('Creating VAPI assistant...');
-        const vapiAssistant = await vapiClient.createAssistant(config);
+        const vapiAssistant = await vapiClient.createAssistant(vapiConfig);
 
         // Save to MongoDB
         const agent = new Agent({
