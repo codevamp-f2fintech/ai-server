@@ -1,8 +1,13 @@
 // Phone Number Routes - API endpoints for managing VAPI phone numbers
+// REQUIRES AUTHENTICATION
 
 const express = require('express');
 const router = express.Router();
 const VapiClient = require('../clients/vapi-client');
+const { authenticate } = require('../middleware/auth');
+
+// Apply authentication middleware to ALL routes
+router.use(authenticate);
 
 // Initialize VAPI client
 const vapiClient = new VapiClient(process.env.VAPI_KEY);
@@ -76,6 +81,8 @@ router.post('/twilio', async (req, res) => {
             name: name || `Twilio ${number}`
         };
 
+        console.log('User', req.userId, 'importing Twilio number:', number);
+
         const phoneNumber = await vapiClient.createPhoneNumber(config);
         res.json({ success: true, phoneNumber });
     } catch (error) {
@@ -110,6 +117,8 @@ router.post('/vapi-sip', async (req, res) => {
             config.authentication = { username, password };
         }
 
+        console.log('User', req.userId, 'creating Vapi SIP:', sipIdentifier);
+
         const phoneNumber = await vapiClient.createPhoneNumber(config);
         res.json({ success: true, phoneNumber });
     } catch (error) {
@@ -140,6 +149,8 @@ router.post('/sip-trunk', async (req, res) => {
             name: name || `SIP ${number}`,
             numberE164CheckEnabled: numberE164CheckEnabled ?? false
         };
+
+        console.log('User', req.userId, 'creating SIP trunk number:', number);
 
         const phoneNumber = await vapiClient.createPhoneNumber(config);
         res.json({ success: true, phoneNumber });
@@ -178,6 +189,7 @@ router.patch('/:id/assign', async (req, res) => {
  */
 router.delete('/:id', async (req, res) => {
     try {
+        console.log('User', req.userId, 'deleting phone number:', req.params.id);
         await vapiClient.deletePhoneNumber(req.params.id);
         res.json({ success: true, message: 'Phone number deleted' });
     } catch (error) {

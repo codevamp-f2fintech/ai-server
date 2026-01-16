@@ -23,6 +23,8 @@ const voiceRoutes = require('./routes/voices');
 const fileRoutes = require('./routes/files');
 const phoneNumberRoutes = require('./routes/phone-numbers');
 const credentialRoutes = require('./routes/credentials');
+const authRoutes = require('./routes/auth');
+const { authenticate } = require('./middleware/auth');
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-telecaller')
@@ -32,6 +34,8 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-teleca
 // Mongoose Call Schema and Model
 const callSchema = new mongoose.Schema({
   _id: { type: String, alias: 'id' },
+  // Owner user ID for multi-tenant isolation
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   assistantId: String,
   phoneNumberId: String,
   type: String,
@@ -79,6 +83,7 @@ app.use('/vapi/voices', voiceRoutes);
 app.use('/vapi/files', fileRoutes);
 app.use('/vapi/phone-numbers', phoneNumberRoutes);
 app.use('/vapi/credentials', credentialRoutes);
+app.use('/auth', authRoutes);
 
 const VAPI_KEY = process.env.VAPI_KEY;
 if (!VAPI_KEY) {
@@ -87,7 +92,8 @@ if (!VAPI_KEY) {
 }
 const BASE = 'https://api.vapi.ai';
 
-app.post('/outbound-call', async (req, res) => {
+// SECURED: Outbound call endpoint requires authentication
+app.post('/outbound-call', authenticate, async (req, res) => {
   try {
     const { to, agentId } = req.body;
     if (!to) return res.status(400).json({ error: 'missing "to" phone number' });
@@ -96,10 +102,11 @@ app.post('/outbound-call', async (req, res) => {
     let agentName = 'Default Agent';
     let agentDbId = null;
 
-    // If custom agent is specified, use it
+    // If custom agent is specified, verify ownership and use it
     if (agentId) {
       const Agent = require('./models/Agent');
-      const agent = await Agent.findById(agentId);
+      // SECURITY: Verify user owns this agent
+      const agent = await Agent.findOne({ _id: agentId, userId: req.userId });
 
       if (!agent) {
         return res.status(404).json({ error: 'Agent not found' });
@@ -113,9 +120,9 @@ app.post('/outbound-call', async (req, res) => {
       agentName = agent.name;
       agentDbId = agent._id;
 
-      console.log(`Using custom agent: ${agentName} (${assistantId})`);
+      console.log(`User ${req.userId} using agent: ${agentName} (${assistantId})`);
     } else {
-      console.log('Using default agent from environment');
+      console.log(`User ${req.userId} using default agent`);
     }
 
     const payload = {
@@ -131,8 +138,9 @@ app.post('/outbound-call', async (req, res) => {
       }
     });
 
-    // Save to MongoDB with agent info
+    // Save to MongoDB with agent info AND userId
     const callData = r.data;
+    callData.userId = req.userId; // Associate call with user
     callData.agentId = agentDbId;
     callData.agentName = agentName;
 
@@ -156,10 +164,17 @@ app.post('/outbound-call', async (req, res) => {
   }
 });
 
-app.get('/outbound-call-info/:id', async (req, res) => {
+// SECURED: Get call info requires authentication and ownership check
+app.get('/outbound-call-info/:id', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
     if (!id) return res.status(400).json({ error: 'missing call "id"' });
+
+    // First verify user owns this call
+    const existingCall = await Call.findById(id);
+    if (existingCall && existingCall.userId && !existingCall.userId.equals(req.userId)) {
+      return res.status(404).json({ error: 'Call not found' });
+    }
 
     const r = await axios.get(`${BASE}/call/${id}`, {
       headers: {
@@ -178,10 +193,11 @@ app.get('/outbound-call-info/:id', async (req, res) => {
   }
 });
 
-// Endpoint to get all calls from the database
-app.get('/calls/list', async (req, res) => {
+// SECURED: Get all calls for the authenticated user only
+app.get('/calls/list', authenticate, async (req, res) => {
   try {
-    const calls = await Call.find().sort({ createdAt: -1 });
+    // SECURITY: Filter by userId to only show user's calls
+    const calls = await Call.find({ userId: req.userId }).sort({ createdAt: -1 });
     res.status(200).json(calls);
   } catch (err) {
     console.error('Failed to fetch calls', err);
@@ -189,7 +205,8 @@ app.get('/calls/list', async (req, res) => {
   }
 });
 
-app.get('/inbound-calls/list', async (req, res) => {
+// SECURED: Inbound calls list requires authentication
+app.get('/inbound-calls/list', authenticate, async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
     const r = await axios.get(`${BASE}/call`, {
@@ -198,7 +215,7 @@ app.get('/inbound-calls/list', async (req, res) => {
         'Content-Type': 'application/json',
       },
     });
-    console.log('Fetched inbound calls from Vapi:', r.data);
+    console.log('User', req.userId, 'fetched inbound calls');
     res.status(200).json(r.data);
   } catch (err) {
     console.error('Failed to fetch inbound calls', err.response?.data || err.message);

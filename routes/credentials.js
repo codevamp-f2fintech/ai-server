@@ -1,8 +1,13 @@
 // Credentials Routes - API endpoints for managing SIP Trunk credentials
+// REQUIRES AUTHENTICATION
 
 const express = require('express');
 const router = express.Router();
 const VapiClient = require('../clients/vapi-client');
+const { authenticate } = require('../middleware/auth');
+
+// Apply authentication middleware to ALL routes
+router.use(authenticate);
 
 const vapiClient = new VapiClient(process.env.VAPI_KEY);
 
@@ -66,6 +71,8 @@ router.post('/sip-trunk', async (req, res) => {
             };
         }
 
+        console.log('User', req.userId, 'creating SIP trunk credential:', name);
+
         const credential = await vapiClient.createCredential(config);
         res.json({ success: true, credential });
     } catch (error) {
@@ -80,6 +87,7 @@ router.post('/sip-trunk', async (req, res) => {
  */
 router.delete('/:id', async (req, res) => {
     try {
+        console.log('User', req.userId, 'deleting credential:', req.params.id);
         await vapiClient.deleteCredential(req.params.id);
         res.json({ success: true, message: 'Credential deleted' });
     } catch (error) {

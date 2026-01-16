@@ -3,6 +3,14 @@
 const mongoose = require('mongoose');
 
 const agentSchema = new mongoose.Schema({
+    // Owner user ID
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true,
+        index: true
+    },
+
     // VAPI Assistant ID
     vapiAssistantId: {
         type: String,

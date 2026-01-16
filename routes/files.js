@@ -1,10 +1,15 @@
 // File Routes - API endpoints for VAPI file uploads (Knowledge Base)
+// REQUIRES AUTHENTICATION
 
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const multer = require('multer');
 const FormData = require('form-data');
+const { authenticate } = require('../middleware/auth');
+
+// Apply authentication middleware to ALL routes
+router.use(authenticate);
 
 // Configure multer for file uploads
 const upload = multer({
@@ -65,7 +70,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
             contentType: req.file.mimetype
         });
 
-        console.log('Uploading file to VAPI:', req.file.originalname);
+        console.log('User', req.userId, 'uploading file:', req.file.originalname);
 
         // Upload to VAPI
         const response = await axios.post(`${VAPI_BASE_URL}/file`, formData, {
