@@ -1,48 +1,34 @@
-// Agent Routes - API endpoints for VAPI agent management
-// ALL routes require authentication and are scoped to the authenticated user
+// Agent Routes - Independent (No VAPI dependency)
+// Agents are stored in MongoDB and used directly by the independent voice pipeline
 
 const express = require('express');
 const router = express.Router();
-const VapiClient = require('../clients/vapi-client');
 const Agent = require('../models/Agent');
 const { authenticate } = require('../middleware/auth');
-
-// Initialize VAPI client
-const vapiClient = new VapiClient(process.env.VAPI_KEY);
 
 // Apply authentication middleware to ALL routes
 router.use(authenticate);
 
 /**
  * POST /vapi/agents
- * Create a new VAPI agent for the authenticated user
+ * Create a new agent (stored in MongoDB only)
  */
 router.post('/', async (req, res) => {
     try {
         const config = req.body;
 
-        // Validate configuration
-        const validation = vapiClient.validateConfig(config);
-        if (!validation.valid) {
+        // Basic validation
+        if (!config.name) {
             return res.status(400).json({
-                error: 'Invalid configuration',
-                details: validation.errors
+                error: 'Agent name is required'
             });
         }
-
-        // Create a VAPI-specific config object by removing internal fields
-        const vapiConfig = { ...config };
-        delete vapiConfig.status;
-
-        // Create assistant in VAPI
-        console.log('Creating VAPI assistant for user:', req.userId);
-        const vapiAssistant = await vapiClient.createAssistant(vapiConfig);
 
         // Save to MongoDB with userId
         const agent = new Agent({
             userId: req.userId, // Associate with authenticated user
-            vapiAssistantId: vapiAssistant.id,
-            name: config.name || 'Unnamed Agent',
+            vapiAssistantId: null, // Not using VAPI anymore
+            name: config.name,
             configuration: config,
             status: 'active',
             metadata: {
@@ -50,26 +36,32 @@ router.post('/', async (req, res) => {
                 tags: config.metadata?.tags || [],
                 createdBy: req.user.email || 'system',
                 category: config.metadata?.category || 'other'
+            },
+            statistics: {
+                totalCalls: 0,
+                successfulCalls: 0,
+                averageDuration: 0,
+                lastUsed: null
             }
         });
 
         await agent.save();
 
-        console.log('Agent saved to database:', agent._id, 'for user:', req.userId);
+        console.log(`[Agents] Created agent ${agent._id} for user ${req.userId}`);
 
         res.status(201).json({
             success: true,
             agent: {
-                id: agent._id,
-                vapiAssistantId: agent.vapiAssistantId,
+                _id: agent._id,
                 name: agent.name,
                 status: agent.status,
-                createdAt: agent.createdAt
+                createdAt: agent.createdAt,
+                configuration: agent.configuration
             }
         });
 
     } catch (error) {
-        console.error('Error creating agent:', error);
+        console.error('[Agents] Error creating agent:', error);
         res.status(500).json({
             error: 'Failed to create agent',
             message: error.message
@@ -108,26 +100,35 @@ router.get('/', async (req, res) => {
 
         const [agents, total] = await Promise.all([
             Agent.find(query)
-                .sort({ 'statistics.lastUsed': -1, createdAt: -1 })
+                .sort({ createdAt: -1 })
                 .skip(skip)
                 .limit(parseInt(limit))
-                .select('-configuration'), // Exclude full config for list view
+                .select('-__v'),
             Agent.countDocuments(query)
         ]);
 
         res.json({
             success: true,
-            data: agents,
+            agents: agents.map(agent => ({
+                _id: agent._id,
+                name: agent.name,
+                status: agent.status,
+                configuration: agent.configuration,
+                metadata: agent.metadata,
+                statistics: agent.statistics,
+                createdAt: agent.createdAt,
+                updatedAt: agent.updatedAt
+            })),
             pagination: {
+                total,
                 page: parseInt(page),
                 limit: parseInt(limit),
-                total,
                 pages: Math.ceil(total / parseInt(limit))
             }
         });
 
     } catch (error) {
-        console.error('Error listing agents:', error);
+        console.error('[Agents] Error listing agents:', error);
         res.status(500).json({
             error: 'Failed to list agents',
             message: error.message
@@ -137,72 +138,54 @@ router.get('/', async (req, res) => {
 
 /**
  * GET /vapi/agents/stats/overview
- * Get overall agent statistics for the authenticated user
+ * Get agent statistics overview for dashboard
  */
 router.get('/stats/overview', async (req, res) => {
     try {
-        // Filter by user
-        const userFilter = { userId: req.userId };
+        const userId = req.userId;
 
-        const [totalAgents, activeAgents, mostUsed] = await Promise.all([
-            Agent.countDocuments(userFilter),
-            Agent.countDocuments({ ...userFilter, status: 'active' }),
-            Agent.find({ ...userFilter, status: 'active' })
-                .sort({ 'statistics.totalCalls': -1 })
-                .limit(5)
+        // Get total agents
+        const totalAgents = await Agent.countDocuments({ userId });
+
+        // Get active agents
+        const activeAgents = await Agent.countDocuments({ userId, status: 'active' });
+
+        // Get agents by category
+        const categories = await Agent.aggregate([
+            { $match: { userId: req.userId } },
+            { $group: { _id: '$metadata.category', count: { $sum: 1 } } }
         ]);
 
-        const totalCalls = await Agent.aggregate([
-            { $match: userFilter },
-            {
-                $group: {
-                    _id: null,
-                    total: { $sum: '$statistics.totalCalls' },
-                    successful: { $sum: '$statistics.successfulCalls' },
-                    failed: { $sum: '$statistics.failedCalls' }
-                }
-            }
-        ]);
+        // Get recent agents
+        const recentAgents = await Agent.find({ userId })
+            .sort({ createdAt: -1 })
+            .limit(5)
+            .select('name status createdAt metadata');
 
         res.json({
             success: true,
             stats: {
                 totalAgents,
                 activeAgents,
-                totalCalls: totalCalls[0]?.total || 0,
-                successfulCalls: totalCalls[0]?.successful || 0,
-                failedCalls: totalCalls[0]?.failed || 0,
-                mostUsed: mostUsed.map(agent => ({
-                    id: agent._id,
-                    name: agent.name,
-                    calls: agent.statistics.totalCalls
+                inactiveAgents: totalAgents - activeAgents,
+                categories: categories.map(c => ({
+                    category: c._id || 'uncategorized',
+                    count: c.count
+                })),
+                recentAgents: recentAgents.map(a => ({
+                    _id: a._id,
+                    name: a.name,
+                    status: a.status,
+                    category: a.metadata.category,
+                    createdAt: a.createdAt
                 }))
             }
         });
 
     } catch (error) {
-        console.error('Error getting stats:', error);
+        console.error('[Agents] Error fetching stats:', error);
         res.status(500).json({
-            error: 'Failed to get stats',
-            message: error.message
-        });
-    }
-});
-
-/**
- * GET /vapi/agents/schema/template
- * Get configuration schema template
- */
-router.get('/schema/template', (req, res) => {
-    try {
-        const schema = vapiClient.getConfigSchema();
-        res.json({
-            success: true,
-            schema
-        });
-    } catch (error) {
-        res.status(500).json({
-            error: 'Failed to get schema',
+            error: 'Failed to fetch statistics',
             message: error.message
         });
     }
@@ -210,11 +193,11 @@ router.get('/schema/template', (req, res) => {
 
 /**
  * GET /vapi/agents/:id
- * Get a specific agent by ID (only if owned by authenticated user)
+ * Get agent by ID (user-scoped)
  */
 router.get('/:id', async (req, res) => {
     try {
-        // CRITICAL: Find by ID AND userId to ensure ownership
+        // CRITICAL: Must match both ID and userId
         const agent = await Agent.findOne({
             _id: req.params.id,
             userId: req.userId
@@ -226,28 +209,80 @@ router.get('/:id', async (req, res) => {
             });
         }
 
-        // Optionally fetch latest data from VAPI
-        try {
-            const vapiAssistant = await vapiClient.getAssistant(agent.vapiAssistantId);
-            // Update configuration if changed
-            if (JSON.stringify(vapiAssistant) !== JSON.stringify(agent.configuration)) {
-                agent.configuration = vapiAssistant;
-                await agent.save();
-            }
-        } catch (vapiError) {
-            console.error('Error syncing with VAPI:', vapiError.message);
-            // Continue with local data
-        }
-
         res.json({
             success: true,
-            agent
+            agent: {
+                _id: agent._id,
+                name: agent.name,
+                status: agent.status,
+                configuration: agent.configuration,
+                metadata: agent.metadata,
+                statistics: agent.statistics,
+                createdAt: agent.createdAt,
+                updatedAt: agent.updatedAt
+            }
         });
 
     } catch (error) {
-        console.error('Error getting agent:', error);
+        console.error('[Agents] Error fetching agent:', error);
         res.status(500).json({
-            error: 'Failed to get agent',
+            error: 'Failed to fetch agent',
+            message: error.message
+        });
+    }
+});
+
+/**
+ * PUT /vapi/agents/:id
+ * Update agent (user-scoped, no VAPI sync)
+ */
+router.put('/:id', async (req, res) => {
+    try {
+        const config = req.body;
+
+        // Find agent and verify ownership
+        const agent = await Agent.findOne({
+            _id: req.params.id,
+            userId: req.userId
+        });
+
+        if (!agent) {
+            return res.status(404).json({
+                error: 'Agent not found'
+            });
+        }
+
+        // Update agent in MongoDB
+        agent.name = config.name || agent.name;
+        agent.configuration = config;
+        agent.status = config.status || agent.status;
+        agent.metadata = {
+            description: config.metadata?.description || agent.metadata.description,
+            tags: config.metadata?.tags || agent.metadata.tags,
+            category: config.metadata?.category || agent.metadata.category,
+            createdBy: agent.metadata.createdBy
+        };
+
+        await agent.save();
+
+        console.log(`[Agents] Updated agent ${agent._id} for user ${req.userId}`);
+
+        res.json({
+            success: true,
+            agent: {
+                _id: agent._id,
+                name: agent.name,
+                status: agent.status,
+                configuration: agent.configuration,
+                metadata: agent.metadata,
+                updatedAt: agent.updatedAt
+            }
+        });
+
+    } catch (error) {
+        console.error('[Agents] Error updating agent:', error);
+        res.status(500).json({
+            error: 'Failed to update agent',
             message: error.message
         });
     }
@@ -255,11 +290,13 @@ router.get('/:id', async (req, res) => {
 
 /**
  * PATCH /vapi/agents/:id
- * Update an existing agent (only if owned by authenticated user)
+ * Update agent (same as PUT, for frontend compatibility)
  */
 router.patch('/:id', async (req, res) => {
     try {
-        // CRITICAL: Find by ID AND userId to ensure ownership
+        const config = req.body;
+
+        // Find agent and verify ownership
         const agent = await Agent.findOne({
             _id: req.params.id,
             userId: req.userId
@@ -271,40 +308,35 @@ router.patch('/:id', async (req, res) => {
             });
         }
 
-        const updates = req.body;
+        // Update agent in MongoDB
+        agent.name = config.name || agent.name;
+        agent.configuration = config;
+        agent.status = config.status || agent.status;
+        agent.metadata = {
+            description: config.metadata?.description || agent.metadata.description,
+            tags: config.metadata?.tags || agent.metadata.tags,
+            category: config.metadata?.category || agent.metadata.category,
+            createdBy: agent.metadata.createdBy
+        };
 
-        // Validate if configuration is being updated
-        if (updates.configuration) {
-            const validation = vapiClient.validateConfig(updates.configuration);
-            if (!validation.valid) {
-                return res.status(400).json({
-                    error: 'Invalid configuration',
-                    details: validation.errors
-                });
-            }
-
-            // Update in VAPI
-            await vapiClient.updateAssistant(agent.vapiAssistantId, updates.configuration);
-        }
-
-        // Update local record
-        if (updates.name) agent.name = updates.name;
-        if (updates.status) agent.status = updates.status;
-        if (updates.configuration) agent.configuration = updates.configuration;
-        if (updates.metadata) {
-            agent.metadata = { ...agent.metadata, ...updates.metadata };
-        }
-
-        agent.metadata.version += 1;
         await agent.save();
+
+        console.log(`[Agents] Updated agent ${agent._id} for user ${req.userId}`);
 
         res.json({
             success: true,
-            agent
+            agent: {
+                _id: agent._id,
+                name: agent.name,
+                status: agent.status,
+                configuration: agent.configuration,
+                metadata: agent.metadata,
+                updatedAt: agent.updatedAt
+            }
         });
 
     } catch (error) {
-        console.error('Error updating agent:', error);
+        console.error('[Agents] Error updating agent:', error);
         res.status(500).json({
             error: 'Failed to update agent',
             message: error.message
@@ -314,12 +346,12 @@ router.patch('/:id', async (req, res) => {
 
 /**
  * DELETE /vapi/agents/:id
- * Delete an agent (only if owned by authenticated user)
+ * Delete agent (user-scoped, no VAPI sync)
  */
 router.delete('/:id', async (req, res) => {
     try {
-        // CRITICAL: Find by ID AND userId to ensure ownership
-        const agent = await Agent.findOne({
+        // Find and delete only if user owns it
+        const agent = await Agent.findOneAndDelete({
             _id: req.params.id,
             userId: req.userId
         });
@@ -330,16 +362,7 @@ router.delete('/:id', async (req, res) => {
             });
         }
 
-        // Delete from VAPI
-        try {
-            await vapiClient.deleteAssistant(agent.vapiAssistantId);
-        } catch (vapiError) {
-            console.error('Error deleting from VAPI:', vapiError.message);
-            // Continue with local deletion
-        }
-
-        // Delete from MongoDB
-        await Agent.findByIdAndDelete(req.params.id);
+        console.log(`[Agents] Deleted agent ${agent._id} for user ${req.userId}`);
 
         res.json({
             success: true,
@@ -347,52 +370,9 @@ router.delete('/:id', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error deleting agent:', error);
+        console.error('[Agents] Error deleting agent:', error);
         res.status(500).json({
             error: 'Failed to delete agent',
-            message: error.message
-        });
-    }
-});
-
-/**
- * POST /vapi/agents/:id/test-call
- * Make a test call with this agent (only if owned by authenticated user)
- */
-router.post('/:id/test-call', async (req, res) => {
-    try {
-        // CRITICAL: Find by ID AND userId to ensure ownership
-        const agent = await Agent.findOne({
-            _id: req.params.id,
-            userId: req.userId
-        });
-
-        if (!agent) {
-            return res.status(404).json({
-                error: 'Agent not found'
-            });
-        }
-
-        const { to } = req.body;
-
-        if (!to) {
-            return res.status(400).json({
-                error: 'Phone number required'
-            });
-        }
-
-        // Use the existing outbound call logic with this agent
-        res.json({
-            success: true,
-            message: 'Test call initiated',
-            agentId: agent._id,
-            to
-        });
-
-    } catch (error) {
-        console.error('Error making test call:', error);
-        res.status(500).json({
-            error: 'Failed to make test call',
             message: error.message
         });
     }

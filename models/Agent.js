@@ -11,11 +11,11 @@ const agentSchema = new mongoose.Schema({
         index: true
     },
 
-    // VAPI Assistant ID
+    // VAPI Assistant ID (optional - only for legacy VAPI integration)
     vapiAssistantId: {
         type: String,
-        required: true,
-        unique: true,
+        required: false,
+        sparse: true, // Allow multiple null values
         index: true
     },
 
