@@ -19,6 +19,15 @@ const agentSchema = new mongoose.Schema({
         index: true
     },
 
+    // Phone Number ID - reference to PhoneNumber model
+    // Used to determine which Twilio credentials to use for calls
+    phoneNumberId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'PhoneNumber',
+        required: false,
+        index: true
+    },
+
     // Agent name for display
     name: {
         type: String,

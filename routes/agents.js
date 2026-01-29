@@ -116,6 +116,7 @@ router.get('/', async (req, res) => {
                 configuration: agent.configuration,
                 metadata: agent.metadata,
                 statistics: agent.statistics,
+                phoneNumberId: agent.phoneNumberId,
                 createdAt: agent.createdAt,
                 updatedAt: agent.updatedAt
             })),
@@ -218,6 +219,7 @@ router.get('/:id', async (req, res) => {
                 configuration: agent.configuration,
                 metadata: agent.metadata,
                 statistics: agent.statistics,
+                phoneNumberId: agent.phoneNumberId,
                 createdAt: agent.createdAt,
                 updatedAt: agent.updatedAt
             }
@@ -264,6 +266,11 @@ router.put('/:id', async (req, res) => {
             createdBy: agent.metadata.createdBy
         };
 
+        // Update phone number ID if provided
+        if (config.phoneNumberId !== undefined) {
+            agent.phoneNumberId = config.phoneNumberId || undefined;
+        }
+
         await agent.save();
 
         console.log(`[Agents] Updated agent ${agent._id} for user ${req.userId}`);
@@ -276,6 +283,7 @@ router.put('/:id', async (req, res) => {
                 status: agent.status,
                 configuration: agent.configuration,
                 metadata: agent.metadata,
+                phoneNumberId: agent.phoneNumberId,
                 updatedAt: agent.updatedAt
             }
         });
@@ -296,6 +304,10 @@ router.put('/:id', async (req, res) => {
 router.patch('/:id', async (req, res) => {
     try {
         const config = req.body;
+
+        // DEBUG: Log what we're receiving
+        console.log('[Agents PATCH] Received config:', JSON.stringify(config, null, 2));
+        console.log('[Agents PATCH] phoneNumberId in config:', config.phoneNumberId);
 
         // Find agent and verify ownership
         const agent = await Agent.findOne({
@@ -321,9 +333,15 @@ router.patch('/:id', async (req, res) => {
             createdBy: agent.metadata.createdBy
         };
 
+        // Update phone number ID if provided
+        if (config.phoneNumberId !== undefined) {
+            agent.phoneNumberId = config.phoneNumberId || undefined;
+        }
+
         await agent.save();
 
         console.log(`[Agents] Updated agent ${agent._id} for user ${req.userId}`);
+        console.log(`[Agents PATCH] Agent phoneNumberId after save:`, agent.phoneNumberId);
 
         res.json({
             success: true,
@@ -333,6 +351,7 @@ router.patch('/:id', async (req, res) => {
                 status: agent.status,
                 configuration: agent.configuration,
                 metadata: agent.metadata,
+                phoneNumberId: agent.phoneNumberId,
                 updatedAt: agent.updatedAt
             }
         });

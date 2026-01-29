@@ -21,7 +21,7 @@ const cors = require('cors');
 const agentRoutes = require('./routes/agents');
 const voiceRoutes = require('./routes/voices');
 const fileRoutes = require('./routes/files');
-const phoneNumberRoutes = require('./routes/phone-numbers');
+const phoneNumberRoutes = require('./routes/phone-numbers-local'); // MongoDB-based (no VAPI)
 const credentialRoutes = require('./routes/credentials');
 const authRoutes = require('./routes/auth');
 const { authenticate } = require('./middleware/auth');
@@ -44,7 +44,7 @@ app.use(express.urlencoded({ extended: true })); // For Twilio webhooks
 app.use('/vapi/agents', agentRoutes);
 app.use('/vapi/voices', voiceRoutes);
 app.use('/vapi/files', fileRoutes);
-app.use('/vapi/phone-numbers', phoneNumberRoutes);
+app.use('/api/phone-numbers', phoneNumberRoutes); // NEW: MongoDB-based phone numbers (no VAPI)
 app.use('/vapi/credentials', credentialRoutes);
 app.use('/auth', authRoutes);
 

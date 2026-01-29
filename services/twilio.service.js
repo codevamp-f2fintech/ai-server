@@ -12,6 +12,79 @@ class TwilioService {
     }
 
     /**
+     * Create TwilioService from environment variables
+     * @returns {TwilioService}
+     */
+    static createFromEnv() {
+        return new TwilioService(
+            process.env.TWILIO_ACCOUNT_SID,
+            process.env.TWILIO_AUTH_TOKEN,
+            process.env.TWILIO_PHONE_NUMBER
+        );
+    }
+
+    /**
+     * Create TwilioService from a PhoneNumber document
+     * @param {Object} phoneNumber - PhoneNumber model instance
+     * @returns {TwilioService}
+     */
+    static createFromPhoneNumber(phoneNumber) {
+        if (!phoneNumber) {
+            throw new Error('Phone number is required');
+        }
+
+        if (phoneNumber.provider !== 'twilio') {
+            throw new Error(`Phone number provider is ${phoneNumber.provider}, expected twilio`);
+        }
+
+        if (!phoneNumber.twilioAccountSid || !phoneNumber.twilioAuthToken) {
+            throw new Error('Phone number missing Twilio credentials');
+        }
+
+        return new TwilioService(
+            phoneNumber.twilioAccountSid,
+            phoneNumber.twilioAuthToken,
+            phoneNumber.number
+        );
+    }
+
+    /**
+     * Create TwilioService from an Agent
+     * Fetches the agent's phone number and creates service with those credentials
+     * Falls back to .env if no phone number is configured
+     * @param {Object} agent - Agent model instance
+     * @returns {Promise<TwilioService>}
+     */
+    static async createFromAgent(agent) {
+        if (!agent) {
+            throw new Error('Agent is required');
+        }
+
+        // If agent has a phone number configured, use it
+        if (agent.phoneNumberId) {
+            const PhoneNumber = require('../models/PhoneNumber');
+            const phoneNumber = await PhoneNumber.findById(agent.phoneNumberId);
+
+            if (!phoneNumber) {
+                console.warn(`[TwilioService] Agent ${agent._id} references non-existent phone number ${agent.phoneNumberId}, falling back to .env`);
+                return TwilioService.createFromEnv();
+            }
+
+            if (phoneNumber.status !== 'active') {
+                console.warn(`[TwilioService] Agent ${agent._id} phone number is inactive, falling back to .env`);
+                return TwilioService.createFromEnv();
+            }
+
+            console.log(`[TwilioService] Using phone number ${phoneNumber.number} for agent ${agent._id}`);
+            return TwilioService.createFromPhoneNumber(phoneNumber);
+        }
+
+        // Fallback to environment variables
+        console.log(`[TwilioService] No phone number configured for agent ${agent._id}, using .env credentials`);
+        return TwilioService.createFromEnv();
+    }
+
+    /**
      * Make an outbound call
      * @param {string} to - Phone number to call
      * @param {string} agentId - Agent ID to use

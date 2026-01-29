@@ -7,12 +7,7 @@ const { authenticate } = require('../middleware/auth');
 const Agent = require('../models/Agent');
 const TwilioService = require('../services/twilio.service');
 
-// Initialize Twilio service
-const twilioService = new TwilioService(
-    process.env.TWILIO_ACCOUNT_SID,
-    process.env.TWILIO_AUTH_TOKEN,
-    process.env.TWILIO_PHONE_NUMBER
-);
+// TwilioService instances are now created dynamically per request based on agent's phone number
 
 /**
  * POST /api/independent-calls/outbound
@@ -52,6 +47,9 @@ router.post('/outbound', authenticate, async (req, res) => {
         if (agent.status !== 'active') {
             return res.status(400).json({ error: 'Agent is not active' });
         }
+
+        // Create TwilioService with agent's phone number credentials (or fallback to .env)
+        const twilioService = await TwilioService.createFromAgent(agent);
 
         // Make call via Twilio
         const call = await twilioService.makeCall(
@@ -122,6 +120,9 @@ router.post('/webhooks/twilio/voice', async (req, res) => {
             console.error(`[IndependentCalls] Agent not found: ${agentId}`);
             return res.status(404).send('Agent not found');
         }
+
+        // Create TwilioService with agent's credentials
+        const twilioService = await TwilioService.createFromAgent(agent);
 
         // Generate WebSocket URL from BASE_URL
         const baseUrl = process.env.BASE_URL || `http://${req.get('host')}`;
@@ -251,6 +252,15 @@ router.post('/:callId/end', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Call not found' });
         }
 
+        // Load agent to get phone number credentials
+        const agent = await Agent.findById(call.agentId);
+        if (!agent) {
+            return res.status(404).json({ error: 'Agent not found for this call' });
+        }
+
+        // Create TwilioService with agent's credentials
+        const twilioService = await TwilioService.createFromAgent(agent);
+
         // Hangup via Twilio
         await twilioService.hangupCall(call._id);
 
@@ -288,6 +298,32 @@ router.get('/:callId/recording', authenticate, async (req, res) => {
 
         if (!call.recordingUrl) {
             return res.status(404).json({ error: 'Recording not available' });
+        }
+
+        // Load agent to get phone number credentials
+        const agent = await Agent.findById(call.agentId);
+        if (!agent) {
+            return res.status(404).json({ error: 'Agent not found for this call' });
+        }
+
+        // Get Twilio credentials from agent's phone number or fallback to .env
+        let twilioAccountSid, twilioAuthToken;
+        if (agent.phoneNumberId) {
+            const PhoneNumber = require('../models/PhoneNumber');
+            const phoneNumber = await PhoneNumber.findById(agent.phoneNumberId);
+
+            if (phoneNumber && phoneNumber.provider === 'twilio') {
+                twilioAccountSid = phoneNumber.twilioAccountSid;
+                twilioAuthToken = phoneNumber.twilioAuthToken;
+            } else {
+                // Fallback to .env
+                twilioAccountSid = process.env.TWILIO_ACCOUNT_SID;
+                twilioAuthToken = process.env.TWILIO_AUTH_TOKEN;
+            }
+        } else {
+            // No phone number configured, use .env
+            twilioAccountSid = process.env.TWILIO_ACCOUNT_SID;
+            twilioAuthToken = process.env.TWILIO_AUTH_TOKEN;
         }
 
         // Fetch recording from Twilio with authentication
