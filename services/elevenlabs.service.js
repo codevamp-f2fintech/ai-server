@@ -33,8 +33,14 @@ class ElevenLabsService {
             const voiceSettings = {
                 stability: config.stability || 0.5,
                 similarity_boost: config.similarity_boost || config.similarityBoost || 0.75,
-                use_speaker_boost: true
+                use_speaker_boost: true,
+                style: 0  // Explicitly set to 0 to avoid unintended style exaggeration
             };
+
+            // Add speed if provided (range 0.7 to 1.2, default 1.0)
+            if (config.speed) {
+                voiceSettings.speed = config.speed;  // ✅ FIXED: Use 'speed' not 'style'
+            }
 
             // Use configured model or default to eleven_turbo_v2
             // eleven_multilingual_v2 is needed for Hindi and other non-English languages

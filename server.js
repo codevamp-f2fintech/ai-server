@@ -146,6 +146,19 @@ app.get('/outbound-call-info/:id', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Call not found' });
     }
 
+    // Check if this is an independent call (Twilio SID format starts with CA/CS)
+    // or a VAPI call (UUID format)
+    const isTwilioCall = /^(CA|CS)[a-f0-9]{32}$/i.test(id);
+
+    if (isTwilioCall) {
+      // Independent call - return from MongoDB only (no VAPI API call)
+      if (!existingCall) {
+        return res.status(404).json({ error: 'Call not found' });
+      }
+      return res.status(200).json(existingCall);
+    }
+
+    // VAPI call - fetch from VAPI API
     const r = await axios.get(`${BASE}/call/${id}`, {
       headers: {
         Authorization: `Bearer ${VAPI_KEY}`,

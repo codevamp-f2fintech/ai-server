@@ -143,43 +143,14 @@ class ConversationOrchestrator extends EventEmitter {
             console.log('[Orchestrator] Getting AI response');
 
             let fullResponse = '';
-            let sentenceBuffer = '';
 
             // Get streaming response from Gemini
             await this.gemini.getResponse(userMessage, async (chunk) => {
                 fullResponse += chunk;
-                sentenceBuffer += chunk;
-
-                // Check for sentence boundaries to start speaking early
-                const boundaries = this.agentConfig.voice.inputPunctuationBoundaries ||
-                    ['.', '!', '?'];
-
-                const hasBoundary = boundaries.some(p => sentenceBuffer.includes(p));
-
-                if (hasBoundary && sentenceBuffer.trim().length > 10) {
-                    // Set state to speaking to block Deepgram transcription
-                    this.state = 'speaking';
-
-                    // Stream this sentence to TTS
-                    await this.elevenlabs.streamTextChunk(
-                        sentenceBuffer,
-                        this.agentConfig.voice,
-                        (audioChunk) => this.onAudioChunk(audioChunk)
-                    );
-                    sentenceBuffer = '';
-                }
+                // Just accumulate, don't stream to TTS chunk-by-chunk
             });
 
-            // Flush any remaining text
-            if (sentenceBuffer.trim().length > 0) {
-                this.state = 'speaking';
-                await this.elevenlabs.flushTextBuffer(
-                    this.agentConfig.voice,
-                    (audioChunk) => this.onAudioChunk(audioChunk)
-                );
-            }
-
-            // Log conversation
+            // Add to conversation log
             this.conversationLog.push({
                 role: 'assistant',
                 content: fullResponse,
@@ -188,12 +159,8 @@ class ConversationOrchestrator extends EventEmitter {
 
             this.emit('assistant_speech', fullResponse);
 
-            // Wait for TTS to finish playing before listening
-            await this.delay(500);
-
-            // Back to listening
-            this.state = 'listening';
-            this.startSilenceTimer();
+            // Speak the complete response once
+            await this.speak(fullResponse);
 
         } catch (error) {
             console.error('[Orchestrator] Error getting AI response:', error);

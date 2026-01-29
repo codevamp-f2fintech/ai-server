@@ -268,4 +268,52 @@ router.post('/:callId/end', authenticate, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/independent-calls/:callId/recording
+ * Proxy endpoint to fetch Twilio recording without browser auth prompt
+ */
+router.get('/:callId/recording', authenticate, async (req, res) => {
+    try {
+        const Call = require('../models/Call');
+        const axios = require('axios');
+
+        const call = await Call.findOne({
+            _id: req.params.callId,
+            userId: req.userId
+        });
+
+        if (!call) {
+            return res.status(404).json({ error: 'Call not found' });
+        }
+
+        if (!call.recordingUrl) {
+            return res.status(404).json({ error: 'Recording not available' });
+        }
+
+        // Fetch recording from Twilio with authentication
+        const response = await axios.get(call.recordingUrl, {
+            auth: {
+                username: process.env.TWILIO_ACCOUNT_SID,
+                password: process.env.TWILIO_AUTH_TOKEN
+            },
+            responseType: 'stream'
+        });
+
+        // Set appropriate headers
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Content-Disposition', `inline; filename="recording-${req.params.callId}.mp3"`);
+
+        // Stream the recording to the client
+        response.data.pipe(res);
+
+    } catch (error) {
+        console.error('[IndependentCalls] Error fetching recording:', error);
+        res.status(500).json({
+            error: 'Failed to fetch recording',
+            message: error.message
+        });
+    }
+});
+
+
 module.exports = router;

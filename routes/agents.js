@@ -254,7 +254,8 @@ router.put('/:id', async (req, res) => {
 
         // Update agent in MongoDB
         agent.name = config.name || agent.name;
-        agent.configuration = config;
+        // Extract configuration if it's nested (new format) or use config directly (old format)
+        agent.configuration = config.configuration || config;
         agent.status = config.status || agent.status;
         agent.metadata = {
             description: config.metadata?.description || agent.metadata.description,
@@ -310,7 +311,8 @@ router.patch('/:id', async (req, res) => {
 
         // Update agent in MongoDB
         agent.name = config.name || agent.name;
-        agent.configuration = config;
+        // Extract configuration if it's nested (new format) or use config directly (old format)
+        agent.configuration = config.configuration || config;
         agent.status = config.status || agent.status;
         agent.metadata = {
             description: config.metadata?.description || agent.metadata.description,
