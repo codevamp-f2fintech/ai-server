@@ -569,7 +569,8 @@ class SipTrunkService extends EventEmitter {
                 cseq,
                 startTime: Date.now(),
                 localSipPort: null,  // Will be set when socket binds
-                authSent: false      // Track if we've already sent authenticated INVITE
+                authSent: false,     // Track if we've already sent authenticated INVITE
+                answered: false      // Track if 200 OK already processed
             };
 
             this.activeCalls.set(callId, callData);
@@ -612,7 +613,12 @@ class SipTrunkService extends EventEmitter {
                     this.emit('ringing', { callId, internalCallId });
 
                 } else if (response.statusCode === 200) {
-                    // Call answered!
+                    // Call answered! - only process once
+                    if (callData.answered) {
+                        console.log('[SipTrunk] 200 OK already processed, ignoring duplicate');
+                        return;
+                    }
+                    callData.answered = true;
                     console.log('[SipTrunk] Call answered!');
                     callData.status = 'answered';
                     callData.toTag = response.toTag;
