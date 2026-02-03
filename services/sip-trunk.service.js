@@ -643,9 +643,19 @@ class SipTrunkService extends EventEmitter {
                     this.emit('ringing', { callId, internalCallId });
 
                 } else if (response.statusCode === 200) {
-                    // Call answered! - only process once
+                    // Call answered! - only setup session once, but update RTP endpoint if changed
                     if (callData.answered) {
-                        console.log('[SipTrunk] 200 OK already processed, ignoring duplicate');
+                        // Still update RTP endpoint if SDP has different IP (call re-routing)
+                        if (response.sdp && (response.sdp.remoteIp !== callData.remoteRtpIp ||
+                            response.sdp.remoteRtpPort !== callData.remoteRtpPort)) {
+                            const oldIp = callData.remoteRtpIp;
+                            const oldPort = callData.remoteRtpPort;
+                            callData.remoteRtpIp = response.sdp.remoteIp;
+                            callData.remoteRtpPort = response.sdp.remoteRtpPort;
+                            console.log(`[SipTrunk] RTP endpoint updated: ${oldIp}:${oldPort} -> ${callData.remoteRtpIp}:${callData.remoteRtpPort}`);
+                        } else {
+                            console.log('[SipTrunk] 200 OK already processed, ignoring duplicate');
+                        }
                         return;
                     }
                     callData.answered = true;
