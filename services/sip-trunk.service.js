@@ -568,7 +568,8 @@ class SipTrunkService extends EventEmitter {
                 status: 'initiating',
                 cseq,
                 startTime: Date.now(),
-                localSipPort: null  // Will be set when socket binds
+                localSipPort: null,  // Will be set when socket binds
+                authSent: false      // Track if we've already sent authenticated INVITE
             };
 
             this.activeCalls.set(callId, callData);
@@ -581,7 +582,12 @@ class SipTrunkService extends EventEmitter {
                 console.log(`[SipTrunk] Received ${response.statusCode} ${response.statusText}`);
 
                 if (response.statusCode === 401 || response.statusCode === 407) {
-                    // Authentication required
+                    // Authentication required - only send once!
+                    if (callData.authSent) {
+                        console.log('[SipTrunk] Auth already sent, ignoring duplicate 401');
+                        return;
+                    }
+                    callData.authSent = true;
                     console.log('[SipTrunk] Authentication required, sending credentials...');
 
                     cseq++;
