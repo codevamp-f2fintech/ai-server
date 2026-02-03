@@ -8,10 +8,15 @@ const Agent = require('../models/Agent');
 const TwilioService = require('../services/twilio.service');
 
 // TwilioService instances are now created dynamically per request based on agent's phone number
+// SipTrunkService is used for SIP trunk providers
+
+const PhoneNumber = require('../models/PhoneNumber');
+const SipTrunkService = require('../services/sip-trunk.service');
 
 /**
  * POST /api/independent-calls/outbound
  * Make an outbound call using independent voice pipeline (no VAPI)
+ * Supports both Twilio and SIP Trunk providers
  */
 router.post('/outbound', authenticate, async (req, res) => {
     try {
@@ -39,7 +44,7 @@ router.post('/outbound', authenticate, async (req, res) => {
 
         // Verify agent exists and user owns it
         const agent = await Agent.findOne({ _id: agentId, userId: req.userId });
-        console.log("[IndependentCalls] Agent found:", agent);
+        console.log("[IndependentCalls] Agent found:", agent?.name);
         if (!agent) {
             return res.status(404).json({ error: 'Agent not found or you do not have permission to use it' });
         }
@@ -48,32 +53,111 @@ router.post('/outbound', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Agent is not active' });
         }
 
-        // Create TwilioService with agent's phone number credentials (or fallback to .env)
-        const twilioService = await TwilioService.createFromAgent(agent);
+        // Get the phone number to determine which provider to use
+        let phoneNumber = null;
+        if (agent.phoneNumberId) {
+            phoneNumber = await PhoneNumber.findById(agent.phoneNumberId);
+            console.log('[IndependentCalls] Phone number provider:', phoneNumber?.provider);
+        }
 
-        // Make call via Twilio
-        const call = await twilioService.makeCall(
-            to,
-            agentId,
-            process.env.BASE_URL
-        );
-
-        // Save call to database
         const Call = require('../models/Call');
-        const callRecord = new Call({
-            _id: call.sid,
-            userId: req.userId,
-            agentId: agent._id,
-            agentName: agent.name,
-            type: 'outbound',
-            customer: { number: to },
-            status: 'initiated',
-            phoneCallProvider: 'twilio',
-            phoneCallProviderId: call.sid,
-            phoneCallTransport: 'pstn',
-            startedAt: new Date(),
-            createdAt: new Date()
-        });
+        let call, callRecord;
+
+        // Check if using SIP Trunk
+        if (phoneNumber && phoneNumber.provider === 'sip-trunk') {
+            console.log('[IndependentCalls] Using SIP Trunk provider');
+
+            // Create SipTrunkService
+            const sipService = SipTrunkService.createFromPhoneNumber(phoneNumber);
+
+            // Generate a unique call ID
+            const mongoose = require('mongoose');
+            const internalCallId = new mongoose.Types.ObjectId().toString();
+
+            // Get SipMediaBridge instance
+            const { getInstance: getSipMediaBridge } = require('../services/sip-media-bridge');
+            const sipMediaBridge = getSipMediaBridge();
+
+            // Set up event handlers for call lifecycle BEFORE making the call
+            sipService.on('answered', async ({ callId, internalCallId: iCallId }) => {
+                console.log('[IndependentCalls] SIP call answered, starting media bridge');
+
+                // Get API keys for AI services
+                const apiKeys = {
+                    deepgram: process.env.DEEPGRAM_API_KEY,
+                    gemini: process.env.GEMINI_API_KEY,
+                    elevenlabs: process.env.ELEVENLABS_API_KEY
+                };
+
+                try {
+                    await sipMediaBridge.startSession(iCallId, sipService, callId, agent, apiKeys);
+                    console.log('[IndependentCalls] Media bridge session started');
+                } catch (err) {
+                    console.error('[IndependentCalls] Failed to start media bridge:', err);
+                }
+            });
+
+            sipService.on('ended', async ({ callId, internalCallId: iCallId }) => {
+                console.log('[IndependentCalls] SIP call ended');
+                await sipMediaBridge.onCallEnded(iCallId);
+            });
+
+            sipService.on('ringing', ({ callId, internalCallId: iCallId }) => {
+                console.log(`[IndependentCalls] SIP call ringing: ${iCallId}`);
+            });
+
+            sipService.on('trying', ({ callId, internalCallId: iCallId }) => {
+                console.log(`[IndependentCalls] SIP call trying: ${iCallId}`);
+            });
+
+            // Make call via SIP trunk
+            call = await sipService.makeCall(to, internalCallId);
+
+            // Save call to database
+            callRecord = new Call({
+                _id: internalCallId,
+                userId: req.userId,
+                agentId: agent._id,
+                agentName: agent.name,
+                type: 'outbound',
+                customer: { number: to },
+                status: 'initiated',
+                phoneCallProvider: 'sip-trunk',
+                phoneCallProviderId: call.sipCallId,
+                phoneCallTransport: 'sip',
+                startedAt: new Date(),
+                createdAt: new Date()
+            });
+
+        } else {
+            console.log('[IndependentCalls] Using Twilio provider');
+
+            // Create TwilioService with agent's phone number credentials (or fallback to .env)
+            const twilioService = await TwilioService.createFromAgent(agent);
+
+            // Make call via Twilio
+            call = await twilioService.makeCall(
+                to,
+                agentId,
+                process.env.BASE_URL
+            );
+
+            // Save call to database
+            callRecord = new Call({
+                _id: call.sid,
+                userId: req.userId,
+                agentId: agent._id,
+                agentName: agent.name,
+                type: 'outbound',
+                customer: { number: to },
+                status: 'initiated',
+                phoneCallProvider: 'twilio',
+                phoneCallProviderId: call.sid,
+                phoneCallTransport: 'pstn',
+                startedAt: new Date(),
+                createdAt: new Date()
+            });
+        }
 
         await callRecord.save();
 
@@ -87,10 +171,11 @@ router.post('/outbound', authenticate, async (req, res) => {
             success: true,
             call: {
                 sid: call.sid,
-                to: call.to,
-                from: call.from,
+                to: call.to || to,
+                from: call.from || phoneNumber?.number,
                 status: call.status,
-                agentName: agent.name
+                agentName: agent.name,
+                provider: phoneNumber?.provider || 'twilio'
             }
         });
 

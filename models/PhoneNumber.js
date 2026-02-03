@@ -28,7 +28,7 @@ const phoneNumberSchema = new mongoose.Schema({
     // Provider type
     provider: {
         type: String,
-        enum: ['twilio', 'vapi-sip', 'byo-sip'],
+        enum: ['twilio', 'sip-trunk'],
         required: true,
         default: 'twilio'
     },
@@ -45,22 +45,35 @@ const phoneNumberSchema = new mongoose.Schema({
         // TODO: Encrypt this field in production
     },
 
-    // VAPI SIP details (for 'vapi-sip' provider)
-    sipUri: {
+    // SIP Trunk credentials (for 'sip-trunk' provider)
+    sipServerIp: {
         type: String,
-        required: function () { return this.provider === 'vapi-sip'; }
+        required: function () { return this.provider === 'sip-trunk'; }
     },
 
+    sipUsername: {
+        type: String,
+        required: function () { return this.provider === 'sip-trunk'; }
+    },
+
+    sipPassword: {
+        type: String,
+        required: function () { return this.provider === 'sip-trunk'; }
+        // TODO: Encrypt this field in production
+    },
+
+    sipPort: {
+        type: Number,
+        default: 5060
+    },
+
+    // Legacy fields (kept for backward compatibility)
+    sipUri: String,
     sipAuthentication: {
         username: String,
         password: String
     },
-
-    // BYO SIP details (for 'byo-sip' provider)
-    sipCredentialId: {
-        type: String,
-        required: function () { return this.provider === 'byo-sip'; }
-    },
+    sipCredentialId: String,
 
     // Status
     status: {
@@ -95,7 +108,7 @@ phoneNumberSchema.index({ number: 1 });
 
 // Instance methods
 phoneNumberSchema.methods.canBeUsedForCalls = function () {
-    return this.status === 'active' && this.provider === 'twilio';
+    return this.status === 'active' && (this.provider === 'twilio' || this.provider === 'sip-trunk');
 };
 
 phoneNumberSchema.methods.getTwilioCredentials = function () {
@@ -109,6 +122,19 @@ phoneNumberSchema.methods.getTwilioCredentials = function () {
     };
 };
 
+phoneNumberSchema.methods.getSipTrunkCredentials = function () {
+    if (this.provider !== 'sip-trunk') {
+        throw new Error('Phone number is not a SIP trunk provider');
+    }
+    return {
+        serverIp: this.sipServerIp,
+        username: this.sipUsername,
+        password: this.sipPassword,
+        port: this.sipPort || 5060,
+        phoneNumber: this.number
+    };
+};
+
 // Static methods
 phoneNumberSchema.statics.findByUser = function (userId, filters = {}) {
     return this.find({ userId, ...filters }).sort({ createdAt: -1 });
@@ -116,6 +142,10 @@ phoneNumberSchema.statics.findByUser = function (userId, filters = {}) {
 
 phoneNumberSchema.statics.findTwilioNumbers = function (userId) {
     return this.find({ userId, provider: 'twilio', status: 'active' }).sort({ createdAt: -1 });
+};
+
+phoneNumberSchema.statics.findSipTrunkNumbers = function (userId) {
+    return this.find({ userId, provider: 'sip-trunk', status: 'active' }).sort({ createdAt: -1 });
 };
 
 const PhoneNumber = mongoose.model('PhoneNumber', phoneNumberSchema);

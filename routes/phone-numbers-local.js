@@ -27,9 +27,12 @@ router.get('/', async (req, res) => {
                 provider: pn.provider,
                 status: pn.status,
                 sipUri: pn.sipUri,
+                sipServerIp: pn.sipServerIp,
+                sipPort: pn.sipPort,
                 createdAt: pn.createdAt,
                 // Don't expose credentials in list view
-                hasTwilioCredentials: !!(pn.twilioAccountSid && pn.twilioAuthToken)
+                hasTwilioCredentials: !!(pn.twilioAccountSid && pn.twilioAuthToken),
+                hasSipCredentials: !!(pn.sipUsername && pn.sipPassword)
             })),
             count: phoneNumbers.length
         });
@@ -126,35 +129,35 @@ router.post('/twilio', async (req, res) => {
 });
 
 /**
- * POST /api/phone-numbers/vapi-sip
- * Create a Free Vapi SIP number (stored in MongoDB)
+ * POST /api/phone-numbers/sip-trunk
+ * Create a SIP Trunk phone number (stored in MongoDB)
  */
-router.post('/vapi-sip', async (req, res) => {
+router.post('/sip-trunk', async (req, res) => {
     try {
-        const { sipIdentifier, name, username, password } = req.body;
+        const { number, name, serverIp, username, password, port } = req.body;
 
-        if (!sipIdentifier) {
+        if (!number || !serverIp || !username || !password) {
             return res.status(400).json({
                 success: false,
-                message: 'SIP Identifier is required'
+                message: 'Phone number, SIP Server IP, Username, and Password are required'
             });
         }
 
-        const sipUri = `sip:${sipIdentifier}@sip.vapi.ai`;
-
         const phoneNumber = new PhoneNumber({
             userId: req.userId,
-            number: sipIdentifier,
-            name: name || sipIdentifier,
-            provider: 'vapi-sip',
-            sipUri,
-            sipAuthentication: username && password ? { username, password } : undefined,
+            number,
+            name: name || `SIP ${number}`,
+            provider: 'sip-trunk',
+            sipServerIp: serverIp,
+            sipUsername: username,
+            sipPassword: password,
+            sipPort: port || 5060,
             status: 'active'
         });
 
         await phoneNumber.save();
 
-        console.log('User', req.userId, 'created Vapi SIP:', sipIdentifier);
+        console.log('User', req.userId, 'created SIP Trunk number:', number);
 
         res.json({
             success: true,
@@ -163,13 +166,14 @@ router.post('/vapi-sip', async (req, res) => {
                 number: phoneNumber.number,
                 name: phoneNumber.name,
                 provider: phoneNumber.provider,
-                sipUri: phoneNumber.sipUri,
+                sipServerIp: phoneNumber.sipServerIp,
+                sipPort: phoneNumber.sipPort,
                 status: phoneNumber.status,
                 createdAt: phoneNumber.createdAt
             }
         });
     } catch (error) {
-        console.error('Error creating Vapi SIP:', error);
+        console.error('Error creating SIP Trunk:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 });

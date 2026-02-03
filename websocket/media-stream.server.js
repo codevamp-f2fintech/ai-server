@@ -4,6 +4,7 @@
 const WebSocket = require('ws');
 const ConversationOrchestrator = require('../services/conversation.orchestrator');
 const TwilioService = require('../services/twilio.service');
+const { getInstance: getRecordingService } = require('../services/recording.service');
 const Agent = require('../models/Agent');
 
 class MediaStreamServer {
@@ -20,6 +21,9 @@ class MediaStreamServer {
         );
 
         this.activeSessions = new Map(); // streamSid -> conversation orchestrator
+
+        // Initialize recording service
+        this.recordingService = getRecordingService();
 
         this.setupWebSocketServer();
     }
@@ -144,6 +148,12 @@ class MediaStreamServer {
                 }
             );
 
+            // Start recording for this call
+            this.recordingService.startRecording(callSid, {
+                agentId: agent._id.toString(),
+                agentName: agent.name
+            });
+
             // Store session
             this.activeSessions.set(streamSid, {
                 orchestrator,
@@ -215,6 +225,11 @@ class MediaStreamServer {
         // Decode audio from base64
         const audioBuffer = Buffer.from(msg.media.payload, 'base64');
 
+        // Add to recording (caller audio)
+        if (session.callSid) {
+            this.recordingService.addAudioChunk(session.callSid, audioBuffer, 'caller');
+        }
+
         // Send raw μ-law audio directly to orchestrator (Deepgram configured for mulaw)
         session.orchestrator.processIncomingAudio(audioBuffer);
 
@@ -268,6 +283,14 @@ class MediaStreamServer {
         // Audio is already in μ-law 8kHz from ElevenLabs - send directly to Twilio
         const payload = audioChunk.toString('base64');
 
+        // Add to recording (agent audio) - find callSid from active sessions
+        for (const [streamSid, session] of this.activeSessions) {
+            if (session.ws === ws && session.callSid) {
+                this.recordingService.addAudioChunk(session.callSid, audioChunk, 'agent');
+                break;
+            }
+        }
+
         // Send to Twilio
         ws.send(JSON.stringify({
             event: 'media',
@@ -285,6 +308,10 @@ class MediaStreamServer {
         try {
             const Call = require('../models/Call');
 
+            // Stop recording and upload to S3
+            const recordingUrl = await this.recordingService.stopAndUpload(callSid);
+            console.log('[MediaStream] Recording URL:', recordingUrl || 'None');
+
             await Call.findByIdAndUpdate(
                 callSid,
                 {
@@ -292,13 +319,14 @@ class MediaStreamServer {
                     endedReason: data.reason,
                     transcript: JSON.stringify(data.conversationLog),
                     messages: data.conversationLog,
+                    recordingUrl: recordingUrl || undefined,
                     endedAt: new Date(),
                     updatedAt: new Date()
                 },
                 { upsert: true }
             );
 
-            console.log('[MediaStream] Conversation log saved');
+            console.log('[MediaStream] Conversation log saved with recording');
         } catch (error) {
             console.error('[MediaStream] Error saving conversation log:', error);
         }
