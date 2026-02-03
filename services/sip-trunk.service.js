@@ -249,8 +249,13 @@ class SipTrunkService extends EventEmitter {
      * @param {number} localSipPort - The actual local SIP port (ephemeral or bound)
      */
     createInviteRequest(toNumber, callId, fromTag, cseq, localIp, rtpPort, localSipPort = 5060) {
-        // Clean phone numbers - remove + prefix if present (some SIP providers don't accept it)
-        const cleanTo = toNumber.replace(/^\+/, '');
+        // Clean phone numbers - remove + and country code (91 for India) to match MicroSIP format
+        // MicroSIP uses 10-digit format like 8267818161
+        let cleanTo = toNumber.replace(/^\+/, '');
+        // Remove 91 country code if present (for India)
+        if (cleanTo.startsWith('91') && cleanTo.length > 10) {
+            cleanTo = cleanTo.substring(2);
+        }
         const cleanFrom = this.fromNumber.replace(/^\+/, '');
 
         const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
@@ -360,7 +365,12 @@ class SipTrunkService extends EventEmitter {
      * @param {number} localSipPort - The actual local SIP port (ephemeral or bound)
      */
     createAuthenticatedInvite(toNumber, callId, fromTag, cseq, localIp, rtpPort, authParams, localSipPort = 5060) {
-        const cleanTo = toNumber.replace(/^\+/, '');
+        // Clean phone numbers - remove + and country code (91 for India) to match MicroSIP format
+        let cleanTo = toNumber.replace(/^\+/, '');
+        // Remove 91 country code if present (for India)
+        if (cleanTo.startsWith('91') && cleanTo.length > 10) {
+            cleanTo = cleanTo.substring(2);
+        }
         const cleanFrom = this.fromNumber.replace(/^\+/, '');
         const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
         // Use username as the SIP identity (matches registered identity)
