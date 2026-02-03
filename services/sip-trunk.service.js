@@ -623,9 +623,13 @@ class SipTrunkService extends EventEmitter {
 
                 // Handle incoming SIP requests (BYE, re-INVITE, etc.)
                 if (response.isRequest) {
-                    console.log(`[SipTrunk] Received SIP request: ${response.method}`);
-
                     if (response.method === 'BYE') {
+                        // Only process BYE once
+                        if (callData.byeReceived) {
+                            return; // Silently ignore duplicate BYE
+                        }
+                        callData.byeReceived = true;
+
                         console.log('[SipTrunk] Remote party sent BYE - call ending');
                         // Send 200 OK response to BYE
                         const okResponse = `SIP/2.0 200 OK\r\n` +
@@ -637,8 +641,8 @@ class SipTrunkService extends EventEmitter {
                             `Content-Length: 0\r\n\r\n`;
                         socket.send(Buffer.from(okResponse), this.port, this.serverIp);
 
-                        // Emit call ended event
-                        this.emit('callEnded', { callId, internalCallId, reason: 'remote_hangup' });
+                        // Emit call ended event (matches listener in independent-calls.js)
+                        this.emit('ended', { callId, internalCallId, reason: 'remote_hangup' });
                         return;
                     } else if (response.method === 'ACK') {
                         console.log('[SipTrunk] Received ACK');
