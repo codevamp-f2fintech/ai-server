@@ -6,6 +6,36 @@ const dgram = require('dgram');
 const crypto = require('crypto');
 const EventEmitter = require('events');
 
+// μ-law to A-law conversion table (ITU-T G.711)
+// This converts μ-law (PCMU, codec 0) to A-law (PCMA, codec 8)
+const ULAW_TO_ALAW = [
+    42, 43, 40, 41, 46, 47, 44, 45, 34, 35, 32, 33, 38, 39, 36, 37,
+    58, 59, 56, 57, 62, 63, 60, 61, 50, 51, 48, 49, 54, 55, 52, 53,
+    10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5,
+    26, 27, 24, 25, 30, 31, 28, 29, 18, 19, 16, 17, 22, 23, 20, 21,
+    98, 99, 96, 97, 102, 103, 100, 101, 90, 91, 88, 89, 94, 95, 92, 93,
+    114, 115, 112, 113, 118, 119, 116, 117, 106, 107, 104, 105, 110, 111, 108, 109,
+    66, 67, 64, 65, 70, 71, 68, 69, 74, 75, 72, 73, 78, 79, 76, 77,
+    82, 83, 80, 81, 86, 87, 84, 85, 122, 123, 120, 121, 126, 127, 124, 125,
+    170, 171, 168, 169, 174, 175, 172, 173, 162, 163, 160, 161, 166, 167, 164, 165,
+    186, 187, 184, 185, 190, 191, 188, 189, 178, 179, 176, 177, 182, 183, 180, 181,
+    138, 139, 136, 137, 142, 143, 140, 141, 130, 131, 128, 129, 134, 135, 132, 133,
+    154, 155, 152, 153, 158, 159, 156, 157, 146, 147, 144, 145, 150, 151, 148, 149,
+    226, 227, 224, 225, 230, 231, 228, 229, 218, 219, 216, 217, 222, 223, 220, 221,
+    242, 243, 240, 241, 246, 247, 244, 245, 234, 235, 232, 233, 238, 239, 236, 237,
+    194, 195, 192, 193, 198, 199, 196, 197, 202, 203, 200, 201, 206, 207, 204, 205,
+    210, 211, 208, 209, 214, 215, 212, 213, 250, 251, 248, 249, 254, 255, 252, 253
+];
+
+// Convert μ-law buffer to A-law buffer
+function ulawToAlaw(ulawBuffer) {
+    const alawBuffer = Buffer.alloc(ulawBuffer.length);
+    for (let i = 0; i < ulawBuffer.length; i++) {
+        alawBuffer[i] = ULAW_TO_ALAW[ulawBuffer[i]];
+    }
+    return alawBuffer;
+}
+
 class SipTrunkService extends EventEmitter {
     constructor(config) {
         super();
@@ -747,8 +777,19 @@ class SipTrunkService extends EventEmitter {
         const CHUNK_SIZE = 160;
         let offset = 0;
 
-        while (offset < audioData.length) {
-            const chunk = audioData.slice(offset, Math.min(offset + CHUNK_SIZE, audioData.length));
+        // Convert μ-law to A-law if remote codec is 8 (PCMA)
+        // ElevenLabs outputs μ-law (codec 0), but remote may negotiate A-law (codec 8)
+        let processedAudio = audioData;
+        if (callData.remoteCodec === 8) {
+            processedAudio = ulawToAlaw(audioData);
+            if (!callData.codecConversionLogged) {
+                console.log('[SipTrunk] Converting audio from μ-law to A-law for remote codec 8');
+                callData.codecConversionLogged = true;
+            }
+        }
+
+        while (offset < processedAudio.length) {
+            const chunk = processedAudio.slice(offset, Math.min(offset + CHUNK_SIZE, processedAudio.length));
 
             // Create RTP packet
             const header = Buffer.alloc(12);
