@@ -459,19 +459,29 @@ class SipTrunkService extends EventEmitter {
     }
 
     /**
-     * Parse SIP response
+     * Parse SIP response or request
      */
     parseSipResponse(data) {
         const dataStr = data.toString();
         const lines = dataStr.split('\r\n');
         const response = {};
 
-        // Parse status line
+        // Parse status line (could be response or request)
         const statusLine = lines[0];
+
+        // Check if it's a response (SIP/2.0 xxx ...)
         const statusMatch = statusLine.match(/SIP\/2.0 (\d{3}) (.+)/);
         if (statusMatch) {
             response.statusCode = parseInt(statusMatch[1]);
             response.statusText = statusMatch[2];
+        } else {
+            // Check if it's a request (METHOD sip:... SIP/2.0)
+            const requestMatch = statusLine.match(/^(\w+)\s+(.+)\s+SIP\/2.0/);
+            if (requestMatch) {
+                response.method = requestMatch[1]; // e.g., "BYE", "INVITE", "ACK"
+                response.requestUri = requestMatch[2];
+                response.isRequest = true;
+            }
         }
 
         // Parse headers
@@ -610,6 +620,36 @@ class SipTrunkService extends EventEmitter {
 
             socket.on('message', async (data, rinfo) => {
                 const response = this.parseSipResponse(data);
+
+                // Handle incoming SIP requests (BYE, re-INVITE, etc.)
+                if (response.isRequest) {
+                    console.log(`[SipTrunk] Received SIP request: ${response.method}`);
+
+                    if (response.method === 'BYE') {
+                        console.log('[SipTrunk] Remote party sent BYE - call ending');
+                        // Send 200 OK response to BYE
+                        const okResponse = `SIP/2.0 200 OK\r\n` +
+                            `Via: ${response.headers?.via || ''}\r\n` +
+                            `From: ${response.headers?.from || ''}\r\n` +
+                            `To: ${response.headers?.to || ''}\r\n` +
+                            `Call-ID: ${response.headers?.['call-id'] || callId}\r\n` +
+                            `CSeq: ${response.headers?.cseq || '1 BYE'}\r\n` +
+                            `Content-Length: 0\r\n\r\n`;
+                        socket.send(Buffer.from(okResponse), this.port, this.serverIp);
+
+                        // Emit call ended event
+                        this.emit('callEnded', { callId, internalCallId, reason: 'remote_hangup' });
+                        return;
+                    } else if (response.method === 'ACK') {
+                        console.log('[SipTrunk] Received ACK');
+                        return;
+                    } else if (response.method === 'INVITE') {
+                        console.log('[SipTrunk] Received re-INVITE (ignoring for now)');
+                        return;
+                    }
+                    return;
+                }
+
                 console.log(`[SipTrunk] Received ${response.statusCode} ${response.statusText}`);
 
                 if (response.statusCode === 401 || response.statusCode === 407) {

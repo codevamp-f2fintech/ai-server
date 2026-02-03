@@ -226,7 +226,7 @@ class SipMediaBridge {
                         endedAt: new Date(),
                         endedReason: reason,
                         durationSeconds: Math.round(duration),
-                        transcript: conversationLog,
+                        transcript: JSON.stringify(conversationLog),
                         recordingUrl: recordingUrl || undefined,
                         summary: this.generateCallSummary(conversationLog)
                     },
