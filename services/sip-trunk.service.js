@@ -800,6 +800,19 @@ class SipTrunkService extends EventEmitter {
         const rtpSocket = dgram.createSocket('udp4');
 
         rtpSocket.on('message', (data, rinfo) => {
+            // SYMMETRIC RTP: Update sending endpoint if we receive RTP from a different source
+            // This handles mid-call re-routing before 200 OK SDP update arrives
+            if (rinfo.address !== callData.remoteRtpIp || rinfo.port !== callData.remoteRtpPort) {
+                // Only log and update if it's a valid RTP source (not just any packet)
+                if (data.length > 12) {
+                    const oldIp = callData.remoteRtpIp;
+                    const oldPort = callData.remoteRtpPort;
+                    callData.remoteRtpIp = rinfo.address;
+                    callData.remoteRtpPort = rinfo.port;
+                    console.log(`[SipTrunk] Symmetric RTP: updated endpoint from ${oldIp}:${oldPort} -> ${rinfo.address}:${rinfo.port}`);
+                }
+            }
+
             // RTP packet received from remote party
             // Skip RTP header (12 bytes) to get audio payload
             if (data.length > 12) {
@@ -867,10 +880,10 @@ class SipTrunkService extends EventEmitter {
                 // Socket might be closed, ignore errors
             }
 
-            // Log occasionally
+            // Log occasionally (every 100 packets = ~2 seconds)
             if (!callData.keepAliveCount) callData.keepAliveCount = 0;
             callData.keepAliveCount++;
-            if (callData.keepAliveCount === 1 || callData.keepAliveCount % 500 === 0) {
+            if (callData.keepAliveCount === 1 || callData.keepAliveCount % 100 === 0) {
                 console.log(`[SipTrunk] RTP keep-alive #${callData.keepAliveCount} sent to ${targetIp}:${targetPort}`);
             }
         }, KEEP_ALIVE_INTERVAL);
