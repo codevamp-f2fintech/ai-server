@@ -631,6 +631,13 @@ class SipTrunkService extends EventEmitter {
                         callData.byeReceived = true;
 
                         console.log('[SipTrunk] Remote party sent BYE - call ending');
+
+                        // Clear keep-alive interval
+                        if (callData.keepAliveInterval) {
+                            clearInterval(callData.keepAliveInterval);
+                            callData.keepAliveInterval = null;
+                        }
+
                         // Send 200 OK response to BYE
                         const okResponse = `SIP/2.0 200 OK\r\n` +
                             `Via: ${response.headers?.via || ''}\r\n` +
@@ -813,6 +820,62 @@ class SipTrunkService extends EventEmitter {
         callData.rtpSequence = 0;
         callData.rtpTimestamp = 0;
         callData.ssrc = crypto.randomBytes(4).readUInt32BE(0);
+        callData.lastAudioSentTime = Date.now();
+        callData.isSendingAudio = false;
+
+        // Start RTP keep-alive - send silence packets every 20ms when not sending real audio
+        // This prevents SIP providers from timing out due to RTP inactivity
+        const KEEP_ALIVE_INTERVAL = 20; // 20ms to match RTP ptime
+        const SILENCE_CHUNK_SIZE = 160; // 160 bytes for 20ms at 8kHz
+
+        // Create silence buffer (μ-law silence = 0xFF, A-law silence = 0xD5)
+        const silenceUlaw = Buffer.alloc(SILENCE_CHUNK_SIZE, 0xFF);
+        const silenceAlaw = Buffer.alloc(SILENCE_CHUNK_SIZE, 0xD5);
+
+        callData.keepAliveInterval = setInterval(() => {
+            // Only send keep-alive if not currently sending real audio
+            if (callData.isSendingAudio) {
+                return;
+            }
+
+            // Check if we've been silent for too long (more than 40ms since last audio)
+            const timeSinceLastAudio = Date.now() - callData.lastAudioSentTime;
+            if (timeSinceLastAudio < 40) {
+                return; // Recently sent audio, no need for keep-alive
+            }
+
+            // Select appropriate silence based on codec
+            const silenceBuffer = callData.remoteCodec === 8 ? silenceAlaw : silenceUlaw;
+
+            // Create RTP packet with silence
+            const header = Buffer.alloc(12);
+            header.writeUInt8(0x80, 0); // Version 2
+            header.writeUInt8(callData.remoteCodec || 0x00, 1); // Payload type
+            header.writeUInt16BE(callData.rtpSequence++ & 0xFFFF, 2);
+            header.writeUInt32BE(callData.rtpTimestamp, 4);
+            header.writeUInt32BE(callData.ssrc, 8);
+
+            const rtpPacket = Buffer.concat([header, silenceBuffer]);
+            callData.rtpTimestamp += SILENCE_CHUNK_SIZE;
+
+            const targetIp = callData.remoteRtpIp || this.serverIp;
+            const targetPort = callData.remoteRtpPort || callData.rtpPort;
+
+            try {
+                callData.rtpSocket.send(rtpPacket, targetPort, targetIp);
+            } catch (err) {
+                // Socket might be closed, ignore errors
+            }
+
+            // Log occasionally
+            if (!callData.keepAliveCount) callData.keepAliveCount = 0;
+            callData.keepAliveCount++;
+            if (callData.keepAliveCount === 1 || callData.keepAliveCount % 500 === 0) {
+                console.log(`[SipTrunk] RTP keep-alive #${callData.keepAliveCount} sent to ${targetIp}:${targetPort}`);
+            }
+        }, KEEP_ALIVE_INTERVAL);
+
+        console.log('[SipTrunk] RTP keep-alive started');
     }
 
     /**
@@ -826,6 +889,9 @@ class SipTrunkService extends EventEmitter {
             console.warn('[SipTrunk] No active call to send audio');
             return;
         }
+
+        // Mark that we're sending real audio (pauses keep-alive)
+        callData.isSendingAudio = true;
 
         // Split audio into 20ms chunks (160 bytes each for 8kHz μ-law)
         const CHUNK_SIZE = 160;
@@ -867,6 +933,10 @@ class SipTrunkService extends EventEmitter {
             offset += CHUNK_SIZE;
         }
 
+        // Update last audio sent time and mark as done sending
+        callData.lastAudioSentTime = Date.now();
+        callData.isSendingAudio = false;
+
         // Debug log occasionally
         if (!callData.rtpSendCount) callData.rtpSendCount = 0;
         callData.rtpSendCount++;
@@ -885,6 +955,12 @@ class SipTrunkService extends EventEmitter {
         if (!callData) {
             console.warn('[SipTrunk] No call found to hangup:', callId);
             return;
+        }
+
+        // Clear keep-alive interval
+        if (callData.keepAliveInterval) {
+            clearInterval(callData.keepAliveInterval);
+            callData.keepAliveInterval = null;
         }
 
         const localIp = await this.getLocalIp();
@@ -926,6 +1002,11 @@ class SipTrunkService extends EventEmitter {
      */
     close() {
         for (const [callId, callData] of this.activeCalls) {
+            // Clear keep-alive interval
+            if (callData.keepAliveInterval) {
+                clearInterval(callData.keepAliveInterval);
+                callData.keepAliveInterval = null;
+            }
             if (callData.rtpSocket) callData.rtpSocket.close();
             if (callData.socket) callData.socket.close();
         }
