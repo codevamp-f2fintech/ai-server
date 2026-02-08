@@ -638,6 +638,15 @@ class SipTrunkService extends EventEmitter {
                             callData.keepAliveInterval = null;
                         }
 
+                        // Clear audio send interval and queue
+                        if (callData.audioSendInterval) {
+                            clearInterval(callData.audioSendInterval);
+                            callData.audioSendInterval = null;
+                        }
+                        if (callData.audioQueue) {
+                            callData.audioQueue = [];
+                        }
+
                         // Send 200 OK response to BYE
                         const okResponse = `SIP/2.0 200 OK\r\n` +
                             `Via: ${response.headers?.via || ''}\r\n` +
@@ -910,9 +919,6 @@ class SipTrunkService extends EventEmitter {
             return;
         }
 
-        // Mark that we're sending real audio (pauses keep-alive)
-        callData.isSendingAudio = true;
-
         // Split audio into 20ms chunks (160 bytes each for 8kHz μ-law)
         const CHUNK_SIZE = 160;
         let offset = 0;
@@ -928,42 +934,64 @@ class SipTrunkService extends EventEmitter {
             }
         }
 
+        // Queue all chunks for paced sending
+        if (!callData.audioQueue) {
+            callData.audioQueue = [];
+        }
+
         while (offset < processedAudio.length) {
             const chunk = processedAudio.slice(offset, Math.min(offset + CHUNK_SIZE, processedAudio.length));
-
-            // Create RTP packet
-            const header = Buffer.alloc(12);
-            header.writeUInt8(0x80, 0); // Version 2, no padding, no extension, no CSRC
-            header.writeUInt8(callData.remoteCodec || 0x00, 1); // Payload type from SDP (0=PCMU, 8=PCMA)
-            header.writeUInt16BE(callData.rtpSequence++ & 0xFFFF, 2);
-            header.writeUInt32BE(callData.rtpTimestamp, 4);
-            header.writeUInt32BE(callData.ssrc, 8);
-
-            const rtpPacket = Buffer.concat([header, chunk]);
-
-            // Update timestamp (8000 Hz, 160 samples per 20ms packet)
-            callData.rtpTimestamp += chunk.length;
-
-            // Send to remote RTP endpoint (parsed from SDP)
-            const targetIp = callData.remoteRtpIp || this.serverIp;
-            const targetPort = callData.remoteRtpPort || callData.rtpPort;
-
-            callData.rtpSocket.send(rtpPacket, targetPort, targetIp);
-
+            callData.audioQueue.push(chunk);
             offset += CHUNK_SIZE;
         }
 
-        // Update last audio sent time and mark as done sending
-        callData.lastAudioSentTime = Date.now();
-        callData.isSendingAudio = false;
+        // Start the pacing timer if not already running
+        if (!callData.audioSendInterval) {
+            callData.isSendingAudio = true;
 
-        // Debug log occasionally
-        if (!callData.rtpSendCount) callData.rtpSendCount = 0;
-        callData.rtpSendCount++;
-        if (callData.rtpSendCount === 1 || callData.rtpSendCount % 100 === 0) {
-            const targetIp = callData.remoteRtpIp || this.serverIp;
-            const targetPort = callData.remoteRtpPort || callData.rtpPort;
-            console.log(`[SipTrunk] Sent RTP audio #${callData.rtpSendCount} to ${targetIp}:${targetPort}, ${audioData.length} bytes`);
+            callData.audioSendInterval = setInterval(() => {
+                if (callData.audioQueue.length === 0) {
+                    // Queue empty, stop sending
+                    clearInterval(callData.audioSendInterval);
+                    callData.audioSendInterval = null;
+                    callData.isSendingAudio = false;
+                    callData.lastAudioSentTime = Date.now();
+                    return;
+                }
+
+                const chunk = callData.audioQueue.shift();
+
+                // Create RTP packet
+                const header = Buffer.alloc(12);
+                header.writeUInt8(0x80, 0); // Version 2, no padding, no extension, no CSRC
+                header.writeUInt8(callData.remoteCodec || 0x00, 1); // Payload type from SDP (0=PCMU, 8=PCMA)
+                header.writeUInt16BE(callData.rtpSequence++ & 0xFFFF, 2);
+                header.writeUInt32BE(callData.rtpTimestamp, 4);
+                header.writeUInt32BE(callData.ssrc, 8);
+
+                const rtpPacket = Buffer.concat([header, chunk]);
+
+                // Update timestamp (8000 Hz, 160 samples per 20ms packet)
+                callData.rtpTimestamp += chunk.length;
+
+                // Send to remote RTP endpoint
+                const targetIp = callData.remoteRtpIp || this.serverIp;
+                const targetPort = callData.remoteRtpPort || callData.rtpPort;
+
+                try {
+                    callData.rtpSocket.send(rtpPacket, targetPort, targetIp);
+                } catch (err) {
+                    // Socket might be closed, clear queue and stop
+                    callData.audioQueue = [];
+                }
+
+                // Debug log occasionally
+                if (!callData.rtpSendCount) callData.rtpSendCount = 0;
+                callData.rtpSendCount++;
+                if (callData.rtpSendCount === 1 || callData.rtpSendCount % 100 === 0) {
+                    console.log(`[SipTrunk] Sent RTP audio #${callData.rtpSendCount} to ${targetIp}:${targetPort}`);
+                }
+            }, 20); // 20ms interval for 8kHz audio
         }
     }
 
@@ -981,6 +1009,15 @@ class SipTrunkService extends EventEmitter {
         if (callData.keepAliveInterval) {
             clearInterval(callData.keepAliveInterval);
             callData.keepAliveInterval = null;
+        }
+
+        // Clear audio send interval and queue
+        if (callData.audioSendInterval) {
+            clearInterval(callData.audioSendInterval);
+            callData.audioSendInterval = null;
+        }
+        if (callData.audioQueue) {
+            callData.audioQueue = [];
         }
 
         const localIp = await this.getLocalIp();
@@ -1026,6 +1063,14 @@ class SipTrunkService extends EventEmitter {
             if (callData.keepAliveInterval) {
                 clearInterval(callData.keepAliveInterval);
                 callData.keepAliveInterval = null;
+            }
+            // Clear audio send interval and queue
+            if (callData.audioSendInterval) {
+                clearInterval(callData.audioSendInterval);
+                callData.audioSendInterval = null;
+            }
+            if (callData.audioQueue) {
+                callData.audioQueue = [];
             }
             if (callData.rtpSocket) callData.rtpSocket.close();
             if (callData.socket) callData.socket.close();
