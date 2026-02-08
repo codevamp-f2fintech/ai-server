@@ -713,7 +713,8 @@ class SipTrunkService extends EventEmitter {
                             callData.remoteRtpIp = response.sdp.remoteIp;
                             callData.remoteRtpPort = response.sdp.remoteRtpPort;
                             // Set lockout to prevent symmetric RTP from reverting this change
-                            callData.endpointLockoutUntil = Date.now() + 1000; // 1 second lockout
+                            callData.endpointLockoutUntil = Date.now() + 5000; // 5 second lockout
+                            callData.sdpRerouteOccurred = true; // Permanently disable symmetric RTP
                             console.log(`[SipTrunk] RTP endpoint updated (SDP): ${oldIp}:${oldPort} -> ${callData.remoteRtpIp}:${callData.remoteRtpPort}`);
                         } else {
                             console.log('[SipTrunk] 200 OK already processed, ignoring duplicate');
@@ -813,12 +814,13 @@ class SipTrunkService extends EventEmitter {
         rtpSocket.on('message', (data, rinfo) => {
             // SYMMETRIC RTP: Update sending endpoint if we receive RTP from a different source
             // This handles mid-call re-routing before 200 OK SDP update arrives
-            // BUT: Don't override if we recently got an SDP update (lockout period)
+            // BUT: Disable completely if SDP re-route has occurred (provider sends from old source for a while)
             if (rinfo.address !== callData.remoteRtpIp || rinfo.port !== callData.remoteRtpPort) {
-                // Check lockout - SDP updates take priority
-                if (callData.endpointLockoutUntil && Date.now() < callData.endpointLockoutUntil) {
+                // If SDP re-route happened, never use symmetric RTP (provider is unreliable)
+                if (callData.sdpRerouteOccurred) {
+                    // Ignore - SDP is authoritative after re-route
+                } else if (callData.endpointLockoutUntil && Date.now() < callData.endpointLockoutUntil) {
                     // Within lockout period, ignore this packet's source
-                    // (it's likely a lagging packet from the old endpoint)
                 } else if (data.length > 12) {
                     // Only update if it's a valid RTP source (not just any packet)
                     const oldIp = callData.remoteRtpIp;
