@@ -257,8 +257,10 @@ class ConversationOrchestrator extends EventEmitter {
             console.log(`[Orchestrator] processIncomingAudio state=${this.state}, deepgram ready=${this.deepgram?.isConnectionReady?.()}`);
         }
 
-        // CRITICAL FIX: Check if Deepgram is ready before sending audio
-        if (this.state === 'listening' && this.deepgram && this.deepgram.isConnectionReady()) {
+        // ALWAYS send audio to Deepgram to keep WebSocket connection alive
+        // The _ignoreTranscripts flag in DeepgramService handles discarding
+        // results during speaking/thinking states
+        if (this.state !== 'ended' && this.deepgram && this.deepgram.isConnectionReady()) {
             this.deepgram.sendAudio(audioBuffer);
         }
     }
