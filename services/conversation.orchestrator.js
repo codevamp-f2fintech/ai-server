@@ -31,6 +31,7 @@ class ConversationOrchestrator extends EventEmitter {
         console.log('  - Transcriber Language:', this.agentConfig.transcriber?.language || 'MISSING');
 
         this.state = 'idle'; // idle, listening, thinking, speaking, ended
+        this._aborted = false; // Hard stop flag - once set, pipeline must stop
         this.startTime = Date.now();
         this.conversationLog = [];
 
@@ -104,7 +105,7 @@ class ConversationOrchestrator extends EventEmitter {
      * Handle user speech
      */
     async onUserSpeech(transcript) {
-        if (this.state === 'ended') return;
+        if (this.state === 'ended' || this._aborted) return;
 
         console.log(`[Orchestrator] User said: ${transcript}`);
 
@@ -125,6 +126,12 @@ class ConversationOrchestrator extends EventEmitter {
             await this.delay(this.agentConfig.responseDelaySeconds * 1000);
         }
 
+        // Check again after delay - call may have ended during wait
+        if (this._aborted) {
+            console.log('[Orchestrator] Call ended during response delay, aborting');
+            return;
+        }
+
         // Get AI response
         await this.getAIResponse(transcript);
     }
@@ -133,6 +140,8 @@ class ConversationOrchestrator extends EventEmitter {
      * Get AI response and speak it
      */
     async getAIResponse(userMessage) {
+        if (this._aborted) return;
+
         this.state = 'thinking';
         this.emit('thinking');
 
@@ -150,6 +159,12 @@ class ConversationOrchestrator extends EventEmitter {
                 // Just accumulate, don't stream to TTS chunk-by-chunk
             });
 
+            // CRITICAL: Check if call ended while Gemini was processing
+            if (this._aborted) {
+                console.log('[Orchestrator] Call ended during AI processing, skipping TTS');
+                return;
+            }
+
             // Add to conversation log
             this.conversationLog.push({
                 role: 'assistant',
@@ -163,6 +178,7 @@ class ConversationOrchestrator extends EventEmitter {
             await this.speak(fullResponse);
 
         } catch (error) {
+            if (this._aborted) return; // Don't recover if call is dead
             console.error('[Orchestrator] Error getting AI response:', error);
             this.emit('error', error);
 
@@ -183,6 +199,12 @@ class ConversationOrchestrator extends EventEmitter {
      * Speak text using TTS
      */
     async speak(text) {
+        // CRITICAL: Don't speak if call is already ended
+        if (this._aborted) {
+            console.log('[Orchestrator] speak() skipped - call already ended');
+            return;
+        }
+
         this.state = 'speaking';
         this.emit('speaking', text);
 
@@ -198,11 +220,17 @@ class ConversationOrchestrator extends EventEmitter {
                 (audioChunk) => this.onAudioChunk(audioChunk)
             );
 
-            this.state = 'listening';
-            console.log('[Orchestrator] Speaking complete, now listening');
-            this.startSilenceTimer();
+            // CRITICAL: Only transition to listening if call is still alive
+            if (!this._aborted) {
+                this.state = 'listening';
+                console.log('[Orchestrator] Speaking complete, now listening');
+                this.startSilenceTimer();
+            } else {
+                console.log('[Orchestrator] Speaking complete but call already ended, not restarting listener');
+            }
 
         } catch (error) {
+            if (this._aborted) return; // Expected if call ended mid-TTS
             console.error('[Orchestrator] TTS error:', error);
             this.emit('error', error);
         }
@@ -212,6 +240,8 @@ class ConversationOrchestrator extends EventEmitter {
      * Handle audio chunks from TTS
      */
     onAudioChunk(audioChunk) {
+        // CRITICAL: Don't emit audio if call is ended
+        if (this._aborted) return;
         // Emit audio chunk to be sent to phone call
         this.emit('audio', audioChunk);
     }
@@ -275,6 +305,7 @@ class ConversationOrchestrator extends EventEmitter {
         console.log(`[Orchestrator] Ending conversation: ${reason}`);
 
         this.state = 'ended';
+        this._aborted = true; // Hard stop - all async pipeline checks this
 
         // Clear timers
         this.clearSilenceTimer();

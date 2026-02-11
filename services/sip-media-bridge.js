@@ -10,6 +10,7 @@ const Call = require('../models/Call');
 class SipMediaBridge {
     constructor() {
         this.activeSessions = new Map(); // internalCallId -> session data
+        this._endingSessions = new Set(); // Guard against duplicate endSession calls
         this.recordingService = getRecordingService();
 
         console.log('[SipMediaBridge] Initialized');
@@ -123,6 +124,11 @@ class SipMediaBridge {
 
         // Listen for audio events from orchestrator (TTS output)
         orchestrator.on('audio', (audioChunk) => {
+            // Check if session still exists before sending audio
+            if (!this.activeSessions.has(internalCallId)) {
+                return;
+            }
+
             session.ttsPacketCount++;
 
             // Debug log every 50 packets
@@ -185,11 +191,19 @@ class SipMediaBridge {
      * @param {string} reason - Reason for ending
      */
     async endSession(internalCallId, reason = 'unknown') {
+        // Guard against duplicate endSession calls
+        if (this._endingSessions.has(internalCallId)) {
+            console.log(`[SipMediaBridge] endSession already in progress for ${internalCallId}, skipping`);
+            return;
+        }
+
         const session = this.activeSessions.get(internalCallId);
         if (!session) {
             console.warn(`[SipMediaBridge] No session found for ${internalCallId}`);
             return;
         }
+
+        this._endingSessions.add(internalCallId);
 
         console.log(`[SipMediaBridge] Ending session ${internalCallId}, reason: ${reason}`);
 
@@ -248,11 +262,13 @@ class SipMediaBridge {
 
             // 7. Cleanup session
             this.activeSessions.delete(internalCallId);
+            this._endingSessions.delete(internalCallId);
             console.log(`[SipMediaBridge] Session ${internalCallId} cleaned up`);
 
         } catch (error) {
             console.error(`[SipMediaBridge] Error ending session:`, error);
             this.activeSessions.delete(internalCallId);
+            this._endingSessions.delete(internalCallId);
         }
     }
 

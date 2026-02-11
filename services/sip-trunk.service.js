@@ -629,6 +629,7 @@ class SipTrunkService extends EventEmitter {
                             return; // Silently ignore duplicate BYE
                         }
                         callData.byeReceived = true;
+                        callData.callEnded = true; // Stop sendAudio from queuing more packets
 
                         console.log('[SipTrunk] Remote party sent BYE - call ending');
 
@@ -664,7 +665,55 @@ class SipTrunkService extends EventEmitter {
                         console.log('[SipTrunk] Received ACK');
                         return;
                     } else if (response.method === 'INVITE') {
-                        console.log('[SipTrunk] Received re-INVITE (ignoring for now)');
+                        // Handle re-INVITE: respond with 200 OK + SDP to keep call alive
+                        console.log('[SipTrunk] Received re-INVITE, responding with 200 OK');
+
+                        // Update RTP endpoint if new SDP is present
+                        if (response.sdp) {
+                            if (response.sdp.remoteIp && response.sdp.remoteRtpPort) {
+                                const oldIp = callData.remoteRtpIp;
+                                const oldPort = callData.remoteRtpPort;
+                                callData.remoteRtpIp = response.sdp.remoteIp;
+                                callData.remoteRtpPort = response.sdp.remoteRtpPort;
+                                if (oldIp !== callData.remoteRtpIp || oldPort !== callData.remoteRtpPort) {
+                                    console.log(`[SipTrunk] RTP endpoint updated (re-INVITE): ${oldIp}:${oldPort} -> ${callData.remoteRtpIp}:${callData.remoteRtpPort}`);
+                                    callData.endpointLockoutUntil = Date.now() + 5000;
+                                    callData.sdpRerouteOccurred = true;
+                                }
+                            }
+                        }
+
+                        // Build 200 OK response with our SDP
+                        const reInviteSdp = [
+                            'v=0',
+                            `o=- ${Date.now()} ${Date.now()} IN IP4 ${localIp}`,
+                            's=VaniVoiceAI',
+                            `c=IN IP4 ${localIp}`,
+                            't=0 0',
+                            `m=audio ${callData.rtpPort} RTP/AVP 0 8`,
+                            'a=rtpmap:0 PCMU/8000',
+                            'a=rtpmap:8 PCMA/8000',
+                            'a=ptime:20',
+                            'a=sendrecv',
+                            ''
+                        ].join('\r\n');
+
+                        const reInviteOk = [
+                            `SIP/2.0 200 OK`,
+                            `Via: ${response.headers?.via || ''}`,
+                            `From: ${response.headers?.from || ''}`,
+                            `To: ${response.headers?.to || ''}`,
+                            `Call-ID: ${response.headers?.['call-id'] || callId}`,
+                            `CSeq: ${response.headers?.cseq || '1 INVITE'}`,
+                            `Contact: <sip:${this.username}@${localIp}:${callData.localSipPort}>`,
+                            `Content-Type: application/sdp`,
+                            `Content-Length: ${reInviteSdp.length}`,
+                            '',
+                            reInviteSdp
+                        ].join('\r\n');
+
+                        socket.send(Buffer.from(reInviteOk), rinfo.port, rinfo.address);
+                        console.log('[SipTrunk] Sent 200 OK for re-INVITE');
                         return;
                     }
                     return;
@@ -918,6 +967,11 @@ class SipTrunkService extends EventEmitter {
         const callData = this.activeCalls.get(callId);
         if (!callData || !callData.rtpSocket) {
             console.warn('[SipTrunk] No active call to send audio');
+            return;
+        }
+
+        // Don't send audio if call is already ended (BYE received)
+        if (callData.callEnded) {
             return;
         }
 

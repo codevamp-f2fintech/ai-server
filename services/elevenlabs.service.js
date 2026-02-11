@@ -11,6 +11,7 @@ class ElevenLabsService {
         }
         this.client = new ElevenLabsClient({ apiKey });
         this.currentStream = null;
+        this._stopped = false;
     }
 
     /**
@@ -61,6 +62,11 @@ class ElevenLabsService {
 
             // Process audio chunks
             for await (const chunk of audioStream) {
+                // CRITICAL: Stop processing if call ended
+                if (this._stopped) {
+                    console.log('[ElevenLabs] Aborting TTS stream - call ended');
+                    break;
+                }
                 if (onAudioChunk) {
                     // Ensure chunk is a proper Buffer (SDK may return Uint8Array)
                     const bufferChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -193,6 +199,7 @@ class ElevenLabsService {
      * Stop current audio stream
      */
     stop() {
+        this._stopped = true; // Signal the for-await loop to break
         if (this.currentStream) {
             this.currentStream.destroy();
             this.currentStream = null;
