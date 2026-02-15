@@ -1,8 +1,20 @@
 // ElevenLabs Service - Text-to-Speech Integration
-// Handles real-time voice synthesis
+// Handles real-time voice synthesis with v3 model support
 
 const { ElevenLabsClient, stream } = require("elevenlabs");
 const { Readable } = require("stream");
+
+// V3 model IDs - these do NOT support voice_settings (stability, speed, similarity)
+const V3_MODELS = ['eleven_v3', 'eleven_ttv_v3'];
+
+/**
+ * Check if a model ID is a v3 model
+ * @param {string} modelId
+ * @returns {boolean}
+ */
+function isV3Model(modelId) {
+    return V3_MODELS.includes(modelId);
+}
 
 class ElevenLabsService {
     constructor(apiKey) {
@@ -30,34 +42,51 @@ class ElevenLabsService {
             console.log(`[ElevenLabs] Converting to speech: ${text.substring(0, 50)}...`);
             console.log(`[ElevenLabs] Using voice ID: ${voiceId}`);
 
-            // Voice settings object - ONLY include valid ElevenLabs API parameters
-            const voiceSettings = {
-                stability: config.stability || 0.5,
-                similarity_boost: config.similarity_boost || config.similarityBoost || 0.75,
-                use_speaker_boost: true,
-                style: 0  // Explicitly set to 0 to avoid unintended style exaggeration
+            // Use configured model or default to eleven_multilingual_v2 (supports Hindi)
+            const modelId = config.model || 'eleven_multilingual_v2';
+            const isV3 = isV3Model(modelId);
+
+            // Build TTS request body
+            const requestBody = {
+                text,
+                model_id: modelId,
+                output_format: 'ulaw_8000' // μ-law 8kHz format - native for Twilio, no conversion needed
             };
 
-            // Add speed if provided (range 0.7 to 1.2, default 1.0)
-            if (config.speed) {
-                voiceSettings.speed = config.speed;  // ✅ FIXED: Use 'speed' not 'style'
+            // V3 models do NOT support voice_settings (stability, speed, similarity)
+            // Only add voice_settings for non-v3 models
+            if (!isV3) {
+                const voiceSettings = {
+                    stability: config.stability || 0.5,
+                    similarity_boost: config.similarity_boost || config.similarityBoost || 0.75,
+                    use_speaker_boost: true,
+                    style: 0
+                };
+
+                // Add speed if provided (range 0.7 to 1.2, default 1.0)
+                if (config.speed) {
+                    voiceSettings.speed = config.speed;
+                }
+
+                requestBody.voice_settings = voiceSettings;
             }
 
-            // Use configured model or default to eleven_turbo_v2
-            // eleven_multilingual_v2 is needed for Hindi and other non-English languages
-            const modelId = config.model || 'eleven_turbo_v2';
+            // Add language_code for Hindi/Hinglish enforcement
+            // This helps v3 models pronounce Hindi text correctly
+            if (config.hinglish || config.language === 'hi') {
+                requestBody.language_code = 'hi';
+                console.log('[ElevenLabs] Hinglish/Hindi mode enabled - language_code: hi');
+            } else if (config.language && config.language !== 'en') {
+                requestBody.language_code = config.language;
+                console.log(`[ElevenLabs] Language enforcement: ${config.language}`);
+            }
 
-            console.log(`[ElevenLabs] Model: ${modelId}, Settings:`, voiceSettings);
+            console.log(`[ElevenLabs] Model: ${modelId}, V3: ${isV3}, Request:`, JSON.stringify(requestBody).substring(0, 200));
 
-            // Generate audio stream with corrected parameters
+            // Generate audio stream
             const audioStream = await this.client.textToSpeech.convertAsStream(
                 voiceId,
-                {
-                    text,
-                    model_id: modelId,
-                    voice_settings: voiceSettings,
-                    output_format: 'ulaw_8000' // μ-law 8kHz format - native for Twilio, no conversion needed
-                }
+                requestBody
             );
 
             // Process audio chunks
@@ -191,6 +220,29 @@ class ElevenLabsService {
             return await this.client.voices.get(voiceId);
         } catch (error) {
             console.error('[ElevenLabs] Error fetching voice:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Get list of available TTS models
+     * @returns {Promise<Array>} - List of models
+     */
+    async getModels() {
+        try {
+            const response = await this.client.models.getAll();
+            // Filter to only TTS-capable models
+            const ttsModels = (response || []).filter(m => m.can_do_text_to_speech);
+            return ttsModels.map(m => ({
+                modelId: m.model_id,
+                name: m.name,
+                description: m.description,
+                languages: m.languages || [],
+                isV3: isV3Model(m.model_id),
+                canDoTTS: m.can_do_text_to_speech
+            }));
+        } catch (error) {
+            console.error('[ElevenLabs] Error fetching models:', error);
             throw error;
         }
     }

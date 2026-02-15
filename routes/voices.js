@@ -1,4 +1,4 @@
-// Voice Routes - ElevenLabs voices API (no VAPI)
+// Voice Routes - ElevenLabs voices & models API
 
 const express = require('express');
 const router = express.Router();
@@ -6,7 +6,7 @@ const ElevenLabsService = require('../services/elevenlabs.service');
 
 /**
  * GET /vapi/voices
- * Get all available voices from ElevenLabs
+ * Get all available voices from ElevenLabs (user's added voices + defaults)
  */
 router.get('/', async (req, res) => {
     try {
@@ -23,15 +23,20 @@ router.get('/', async (req, res) => {
         res.json({
             success: true,
             voices: voices.map(v => ({
-                voiceId: v.voice_id,  // Convert to camelCase for frontend
+                voiceId: v.voice_id,
                 name: v.name,
-                category: v.category || 'generated',
+                category: v.category || 'generated',  // 'cloned', 'premade', 'generated', 'professional'
                 labels: v.labels || {},
                 description: v.description || '',
                 previewUrl: v.preview_url || null,
-                preview_url: v.preview_url || null, // Keep both for compatibility
+                preview_url: v.preview_url || null,
                 settings: v.settings || null,
-                provider: '11labs'  // Add provider for frontend
+                provider: '11labs',
+                // Include fine tuning status for user's custom voices
+                fineTuning: v.fine_tuning ? {
+                    isAllowedToFineTune: v.fine_tuning.is_allowed_to_fine_tune,
+                    state: v.fine_tuning.state
+                } : null
             })),
             count: voices.length
         });
@@ -46,10 +51,10 @@ router.get('/', async (req, res) => {
 });
 
 /**
- * GET /vapi/voices/:voiceId
- * Get detailed information about a specific voice
+ * GET /vapi/voices/models
+ * Get available TTS models from ElevenLabs
  */
-router.get('/:voiceId', async (req, res) => {
+router.get('/models', async (req, res) => {
     try {
         if (!process.env.ELEVENLABS_API_KEY) {
             return res.status(400).json({
@@ -57,19 +62,19 @@ router.get('/:voiceId', async (req, res) => {
             });
         }
 
-        const { voiceId } = req.params;
         const elevenLabsService = new ElevenLabsService(process.env.ELEVENLABS_API_KEY);
-        const voice = await elevenLabsService.getVoice(voiceId);
+        const models = await elevenLabsService.getModels();
 
         res.json({
             success: true,
-            voice
+            models,
+            count: models.length
         });
 
     } catch (error) {
-        console.error(`[Voices] Error fetching voice ${req.params.voiceId}:`, error);
-        res.status(404).json({
-            error: 'Voice not found',
+        console.error('[Voices] Error fetching models:', error);
+        res.status(500).json({
+            error: 'Failed to fetch models',
             message: error.message
         });
     }
@@ -93,10 +98,15 @@ router.get('/validate/:voiceId', async (req, res) => {
         const elevenLabsService = new ElevenLabsService(process.env.ELEVENLABS_API_KEY);
 
         try {
-            await elevenLabsService.getVoice(voiceId);
+            const voice = await elevenLabsService.getVoice(voiceId);
             res.json({
                 success: true,
-                valid: true
+                valid: true,
+                voice: {
+                    voiceId: voice.voice_id,
+                    name: voice.name,
+                    category: voice.category
+                }
             });
         } catch (error) {
             res.json({
@@ -115,203 +125,40 @@ router.get('/validate/:voiceId', async (req, res) => {
     }
 });
 
-module.exports = router;
-
 /**
- * GET /vapi/voices
- * Get all available voices (from ElevenLabs linked account + default)
+ * GET /vapi/voices/:voiceId
+ * Get detailed information about a specific voice
  */
-router.get('/', async (req, res) => {
-    try {
-        const { source = 'all' } = req.query; // 'all', 'elevenlabs', 'default'
-
-        let voices = [];
-
-        // Get default VAPI voices
-        if (source === 'all' || source === 'default') {
-            const defaultVoices = getDefaultVoices();
-            voices.push(...defaultVoices.map(v => ({ ...v, source: 'default' })));
-        }
-
-        // Get ElevenLabs voices if API key is available
-        if ((source === 'all' || source === 'elevenlabs') && process.env.ELEVENLABS_API_KEY) {
-            try {
-                const elevenLabsClient = new ElevenLabsClient(process.env.ELEVENLABS_API_KEY);
-                const elevenLabsVoices = await elevenLabsClient.getVoices();
-                voices.push(...elevenLabsVoices.map(v => ({ ...v, source: 'elevenlabs' })));
-            } catch (error) {
-                console.error('Error fetching ElevenLabs voices:', error.message);
-            }
-        }
-
-        res.json({
-            success: true,
-            voices,
-            count: voices.length,
-            sources: {
-                hasElevenLabsKey: !!process.env.ELEVENLABS_API_KEY,
-                defaultVoicesCount: getDefaultVoices().length
-            }
-        });
-
-    } catch (error) {
-        console.error('Error getting voices:', error);
-        res.status(500).json({
-            error: 'Failed to fetch voices',
-            message: error.message
-        });
-    }
-});
-
-/**
- * GET /vapi/voices/elevenlabs
- * Get voices from your linked ElevenLabs account only
- */
-router.get('/elevenlabs', async (req, res) => {
+router.get('/:voiceId', async (req, res) => {
     try {
         if (!process.env.ELEVENLABS_API_KEY) {
             return res.status(400).json({
-                error: 'ElevenLabs API key not configured',
-                message: 'Please set ELEVENLABS_API_KEY in your environment variables'
+                error: 'ElevenLabs API key not configured'
             });
         }
 
-        const elevenLabsClient = new ElevenLabsClient(process.env.ELEVENLABS_API_KEY);
-        const voices = await elevenLabsClient.getVoices();
-
-        res.json({
-            success: true,
-            voices,
-            count: voices.length
-        });
-
-    } catch (error) {
-        console.error('Error fetching ElevenLabs voices:', error);
-        res.status(500).json({
-            error: 'Failed to fetch ElevenLabs voices',
-            message: error.message
-        });
-    }
-});
-
-/**
- * GET /vapi/voices/default
- * Get default VAPI-provided voices (no API key needed)
- */
-router.get('/default', (req, res) => {
-    try {
-        const voices = getDefaultVoices();
-        res.json({
-            success: true,
-            voices,
-            count: voices.length
-        });
-    } catch (error) {
-        res.status(500).json({
-            error: 'Failed to get default voices',
-            message: error.message
-        });
-    }
-});
-
-/**
- * GET /vapi/voices/info/:voiceId
- * Get detailed information about a specific voice by ID
- */
-router.get('/info/:voiceId', async (req, res) => {
-    try {
         const { voiceId } = req.params;
-
-        // Check default voices first
-        const defaultVoices = getDefaultVoices();
-        const defaultVoice = defaultVoices.find(v => v.voiceId === voiceId);
-
-        if (defaultVoice) {
-            return res.json({
-                success: true,
-                voice: {
-                    voice_id: defaultVoice.voiceId,
-                    name: defaultVoice.name,
-                    category: defaultVoice.category,
-                    labels: {
-                        gender: defaultVoice.gender,
-                        accent: defaultVoice.accent
-                    },
-                    description: defaultVoice.description
-                },
-                source: 'default'
-            });
-        }
-
-        // Fetch from ElevenLabs
-        if (!process.env.ELEVENLABS_API_KEY) {
-            return res.status(400).json({
-                success: false,
-                message: 'Voice not found in default list and ElevenLabs API key not configured'
-            });
-        }
-
-        const elevenLabsClient = new ElevenLabsClient(process.env.ELEVENLABS_API_KEY);
-        const voice = await elevenLabsClient.getVoice(voiceId);
+        const elevenLabsService = new ElevenLabsService(process.env.ELEVENLABS_API_KEY);
+        const voice = await elevenLabsService.getVoice(voiceId);
 
         res.json({
             success: true,
-            voice,
-            source: 'elevenlabs'
+            voice: {
+                voiceId: voice.voice_id,
+                name: voice.name,
+                category: voice.category || 'generated',
+                labels: voice.labels || {},
+                description: voice.description || '',
+                previewUrl: voice.preview_url || null,
+                settings: voice.settings || null,
+                provider: '11labs'
+            }
         });
 
     } catch (error) {
-        console.error('Error fetching voice info:', error);
+        console.error(`[Voices] Error fetching voice ${req.params.voiceId}:`, error);
         res.status(404).json({
-            success: false,
-            message: 'Voice not found or invalid voice ID'
-        });
-    }
-});
-
-/**
- * GET /vapi/voices/validate/:voiceId
- * Validate that a voice ID exists
- */
-router.get('/validate/:voiceId', async (req, res) => {
-    try {
-        const { voiceId } = req.params;
-
-        // Check default voices first
-        const defaultVoices = getDefaultVoices();
-        const isDefault = defaultVoices.some(v => v.voiceId === voiceId);
-
-        if (isDefault) {
-            return res.json({
-                success: true,
-                valid: true,
-                source: 'default',
-                voice: defaultVoices.find(v => v.voiceId === voiceId)
-            });
-        }
-
-        // Check ElevenLabs account
-        if (!process.env.ELEVENLABS_API_KEY) {
-            return res.json({
-                success: true,
-                valid: false,
-                message: 'Voice not in default list and ElevenLabs API key not configured'
-            });
-        }
-
-        const elevenLabsClient = new ElevenLabsClient(process.env.ELEVENLABS_API_KEY);
-        const isValid = await elevenLabsClient.validateVoiceId(voiceId);
-
-        res.json({
-            success: true,
-            valid: isValid,
-            source: isValid ? 'elevenlabs' : null
-        });
-
-    } catch (error) {
-        console.error('Error validating voice:', error);
-        res.status(500).json({
-            error: 'Failed to validate voice',
+            error: 'Voice not found',
             message: error.message
         });
     }
