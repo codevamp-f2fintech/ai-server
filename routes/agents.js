@@ -1,28 +1,28 @@
-// Agent Routes - API endpoints for VAPI agent management
+// Agent Routes - API endpoints for ElevenLabs agent management
 // ALL routes require authentication and are scoped to the authenticated user
 
 const express = require('express');
 const router = express.Router();
-const VapiClient = require('../clients/vapi-client');
+const ElevenLabsAgentClient = require('../clients/elevenlabs-agent-client');
 const Agent = require('../models/Agent');
 const { authenticate } = require('../middleware/auth');
 
-// Initialize VAPI client
-const vapiClient = new VapiClient(process.env.VAPI_KEY);
+// Initialize ElevenLabs client
+const elevenLabsClient = new ElevenLabsAgentClient(process.env.ELEVENLABS_API_KEY);
 
 // Apply authentication middleware to ALL routes
 router.use(authenticate);
 
 /**
- * POST /vapi/agents
- * Create a new VAPI agent for the authenticated user
+ * POST /elevenlabs/agents
+ * Create a new ElevenLabs agent for the authenticated user
  */
 router.post('/', async (req, res) => {
     try {
         const config = req.body;
 
         // Validate configuration
-        const validation = vapiClient.validateConfig(config);
+        const validation = elevenLabsClient.validateConfig(config);
         if (!validation.valid) {
             return res.status(400).json({
                 error: 'Invalid configuration',
@@ -30,24 +30,21 @@ router.post('/', async (req, res) => {
             });
         }
 
-        // Create a VAPI-specific config object by removing internal fields
-        const vapiConfig = { ...config };
-        delete vapiConfig.status;
-
-        // Create assistant in VAPI
-        console.log('Creating VAPI assistant for user:', req.userId);
-        const vapiAssistant = await vapiClient.createAssistant(vapiConfig);
+        // Create agent in ElevenLabs
+        console.log('Creating ElevenLabs agent for user:', req.userId);
+        const elevenLabsAgent = await elevenLabsClient.createAgent(config);
 
         // Save to MongoDB with userId
         const agent = new Agent({
             userId: req.userId, // Associate with authenticated user
-            vapiAssistantId: vapiAssistant.id,
+            elevenLabsAgentId: elevenLabsAgent.agent_id,
             name: config.name || 'Unnamed Agent',
             configuration: config,
             status: 'active',
+            phoneNumberId: config.phoneNumberId || null,
             metadata: {
                 description: config.metadata?.description || '',
-                tags: config.metadata?.tags || [],
+                tags: config.tags || [],
                 createdBy: req.user.email || 'system',
                 category: config.metadata?.category || 'other'
             }
@@ -61,7 +58,7 @@ router.post('/', async (req, res) => {
             success: true,
             agent: {
                 id: agent._id,
-                vapiAssistantId: agent.vapiAssistantId,
+                elevenLabsAgentId: agent.elevenLabsAgentId,
                 name: agent.name,
                 status: agent.status,
                 createdAt: agent.createdAt
@@ -78,7 +75,7 @@ router.post('/', async (req, res) => {
 });
 
 /**
- * GET /vapi/agents
+ * GET /elevenlabs/agents
  * List agents for the authenticated user only
  */
 router.get('/', async (req, res) => {
@@ -136,7 +133,37 @@ router.get('/', async (req, res) => {
 });
 
 /**
- * GET /vapi/agents/stats/overview
+ * GET /elevenlabs/agents/sync/from-elevenlabs
+ * Fetch all agents directly from ElevenLabs API (not from our database)
+ * This is useful for seeing agents created in ElevenLabs dashboard
+ */
+router.get('/sync/from-elevenlabs', async (req, res) => {
+    try {
+        console.log('Fetching all agents from ElevenLabs API...');
+
+        // Fetch agents directly from ElevenLabs
+        const elevenLabsAgents = await elevenLabsClient.listAgents();
+
+        console.log(`Found ${elevenLabsAgents.length || 0} agents in ElevenLabs`);
+
+        res.json({
+            success: true,
+            data: elevenLabsAgents,
+            count: elevenLabsAgents.length || 0,
+            message: 'Agents fetched from ElevenLabs successfully'
+        });
+
+    } catch (error) {
+        console.error('Error fetching agents from ElevenLabs:', error);
+        res.status(500).json({
+            error: 'Failed to fetch agents from ElevenLabs',
+            message: error.message
+        });
+    }
+});
+
+/**
+ * GET /elevenlabs/agents/stats/overview
  * Get overall agent statistics for the authenticated user
  */
 router.get('/stats/overview', async (req, res) => {
@@ -190,12 +217,12 @@ router.get('/stats/overview', async (req, res) => {
 });
 
 /**
- * GET /vapi/agents/schema/template
+ * GET /elevenlabs/agents/schema/template
  * Get configuration schema template
  */
 router.get('/schema/template', (req, res) => {
     try {
-        const schema = vapiClient.getConfigSchema();
+        const schema = elevenLabsClient.getConfigSchema();
         res.json({
             success: true,
             schema
@@ -209,7 +236,7 @@ router.get('/schema/template', (req, res) => {
 });
 
 /**
- * GET /vapi/agents/:id
+ * GET /elevenlabs/agents/:id
  * Get a specific agent by ID (only if owned by authenticated user)
  */
 router.get('/:id', async (req, res) => {
@@ -226,16 +253,16 @@ router.get('/:id', async (req, res) => {
             });
         }
 
-        // Optionally fetch latest data from VAPI
+        // Optionally fetch latest data from ElevenLabs
         try {
-            const vapiAssistant = await vapiClient.getAssistant(agent.vapiAssistantId);
+            const elevenLabsAgent = await elevenLabsClient.getAgent(agent.elevenLabsAgentId);
             // Update configuration if changed
-            if (JSON.stringify(vapiAssistant) !== JSON.stringify(agent.configuration)) {
-                agent.configuration = vapiAssistant;
+            if (JSON.stringify(elevenLabsAgent) !== JSON.stringify(agent.configuration)) {
+                agent.configuration = elevenLabsAgent;
                 await agent.save();
             }
-        } catch (vapiError) {
-            console.error('Error syncing with VAPI:', vapiError.message);
+        } catch (elevenLabsError) {
+            console.error('Error syncing with ElevenLabs:', elevenLabsError.message);
             // Continue with local data
         }
 
@@ -254,7 +281,7 @@ router.get('/:id', async (req, res) => {
 });
 
 /**
- * PATCH /vapi/agents/:id
+ * PATCH /elevenlabs/agents/:id
  * Update an existing agent (only if owned by authenticated user)
  */
 router.patch('/:id', async (req, res) => {
@@ -275,7 +302,7 @@ router.patch('/:id', async (req, res) => {
 
         // Validate if configuration is being updated
         if (updates.configuration) {
-            const validation = vapiClient.validateConfig(updates.configuration);
+            const validation = elevenLabsClient.validateConfig(updates.configuration);
             if (!validation.valid) {
                 return res.status(400).json({
                     error: 'Invalid configuration',
@@ -283,14 +310,15 @@ router.patch('/:id', async (req, res) => {
                 });
             }
 
-            // Update in VAPI
-            await vapiClient.updateAssistant(agent.vapiAssistantId, updates.configuration);
+            // Update in ElevenLabs
+            await elevenLabsClient.updateAgent(agent.elevenLabsAgentId, updates.configuration);
         }
 
         // Update local record
         if (updates.name) agent.name = updates.name;
         if (updates.status) agent.status = updates.status;
         if (updates.configuration) agent.configuration = updates.configuration;
+        if (updates.phoneNumberId !== undefined) agent.phoneNumberId = updates.phoneNumberId;
         if (updates.metadata) {
             agent.metadata = { ...agent.metadata, ...updates.metadata };
         }
@@ -313,7 +341,7 @@ router.patch('/:id', async (req, res) => {
 });
 
 /**
- * DELETE /vapi/agents/:id
+ * DELETE /elevenlabs/agents/:id
  * Delete an agent (only if owned by authenticated user)
  */
 router.delete('/:id', async (req, res) => {
@@ -330,11 +358,11 @@ router.delete('/:id', async (req, res) => {
             });
         }
 
-        // Delete from VAPI
+        // Delete from ElevenLabs
         try {
-            await vapiClient.deleteAssistant(agent.vapiAssistantId);
-        } catch (vapiError) {
-            console.error('Error deleting from VAPI:', vapiError.message);
+            await elevenLabsClient.deleteAgent(agent.elevenLabsAgentId);
+        } catch (elevenLabsError) {
+            console.error('Error deleting from ElevenLabs:', elevenLabsError.message);
             // Continue with local deletion
         }
 
@@ -356,7 +384,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 /**
- * POST /vapi/agents/:id/test-call
+ * POST /elevenlabs/agents/:id/test-call
  * Make a test call with this agent (only if owned by authenticated user)
  */
 router.post('/:id/test-call', async (req, res) => {
@@ -381,11 +409,14 @@ router.post('/:id/test-call', async (req, res) => {
             });
         }
 
-        // Use the existing outbound call logic with this agent
+        // Initiate outbound call via ElevenLabs
+        const callData = await elevenLabsClient.initiateOutboundCall(agent.elevenLabsAgentId, to);
+
         res.json({
             success: true,
             message: 'Test call initiated',
             agentId: agent._id,
+            conversationId: callData.conversation_id,
             to
         });
 

@@ -1,37 +1,56 @@
-// Phone Number Routes - API endpoints for managing VAPI phone numbers
+// Phone Number Routes - API endpoints for managing ElevenLabs phone numbers
 // REQUIRES AUTHENTICATION
 
 const express = require('express');
 const router = express.Router();
-const VapiClient = require('../clients/vapi-client');
+const ElevenLabsAgentClient = require('../clients/elevenlabs-agent-client');
 const { authenticate } = require('../middleware/auth');
+const Agent = require('../models/Agent');
 
 // Apply authentication middleware to ALL routes
 router.use(authenticate);
 
-// Initialize VAPI client
-const vapiClient = new VapiClient(process.env.VAPI_KEY);
+// Initialize ElevenLabs client
+const elevenLabsClient = new ElevenLabsAgentClient(process.env.ELEVENLABS_API_KEY);
 
 /**
- * GET /vapi/phone-numbers
+ * GET /elevenlabs/phone-numbers
  * List all phone numbers with their assigned agents
  */
 router.get('/', async (req, res) => {
     try {
-        const phoneNumbers = await vapiClient.listPhoneNumbers();
+        const phoneNumbers = await elevenLabsClient.getPhoneNumbers();
 
-        // Enrich with agent info if needed
-        const enrichedNumbers = phoneNumbers.map(pn => ({
-            id: pn.id,
-            number: pn.number,
-            name: pn.name,
-            provider: pn.provider,
-            status: pn.status,
-            assistantId: pn.assistantId,
-            sipUri: pn.sipUri,
-            credentialId: pn.credentialId,
-            createdAt: pn.createdAt
-        }));
+        // Enrich with agent info from our database
+        const enrichedNumbers = await Promise.all(
+            phoneNumbers.map(async (pn) => {
+                let agentInfo = null;
+                if (pn.agent_id) {
+                    // Find agent in our database by elevenLabsAgentId
+                    const agent = await Agent.findOne({
+                        elevenLabsAgentId: pn.agent_id,
+                        userId: req.userId
+                    }).select('name _id');
+
+                    if (agent) {
+                        agentInfo = {
+                            id: agent._id,
+                            name: agent.name
+                        };
+                    }
+                }
+
+                return {
+                    id: pn.phone_number_id,
+                    number: pn.phone_number,
+                    name: pn.name,
+                    provider: pn.provider || 'twilio',
+                    agentId: pn.agent_id,
+                    agent: agentInfo,
+                    createdAt: pn.created_at
+                };
+            })
+        );
 
         res.json({
             success: true,
@@ -45,26 +64,12 @@ router.get('/', async (req, res) => {
 });
 
 /**
- * GET /vapi/phone-numbers/:id
- * Get a specific phone number
- */
-router.get('/:id', async (req, res) => {
-    try {
-        const phoneNumber = await vapiClient.getPhoneNumber(req.params.id);
-        res.json({ success: true, phoneNumber });
-    } catch (error) {
-        console.error('Error getting phone number:', error);
-        res.status(404).json({ success: false, message: 'Phone number not found' });
-    }
-});
-
-/**
- * POST /vapi/phone-numbers/twilio
- * Import a Twilio phone number
+ * POST /elevenlabs/phone-numbers/twilio
+ * Import a Twilio phone number to ElevenLabs
  */
 router.post('/twilio', async (req, res) => {
     try {
-        const { number, twilioAccountSid, twilioAuthToken, name } = req.body;
+        const { number, twilioAccountSid, twilioAuthToken, name, agentId } = req.body;
 
         if (!number || !twilioAccountSid || !twilioAuthToken) {
             return res.status(400).json({
@@ -73,17 +78,40 @@ router.post('/twilio', async (req, res) => {
             });
         }
 
+        // If agentId is provided, verify ownership and get elevenLabsAgentId
+        let elevenLabsAgentId = null;
+        if (agentId) {
+            const agent = await Agent.findOne({ _id: agentId, userId: req.userId });
+            if (!agent) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Agent not found'
+                });
+            }
+            elevenLabsAgentId = agent.elevenLabsAgentId;
+
+            // Update agent's phoneNumberId will be done after phone number creation
+        }
+
         const config = {
-            provider: 'twilio',
-            number,
+            phone_number: number,
             twilioAccountSid,
             twilioAuthToken,
-            name: name || `Twilio ${number}`
+            name: name || `Twilio ${number}`,
+            agent_id: elevenLabsAgentId
         };
 
         console.log('User', req.userId, 'importing Twilio number:', number);
 
-        const phoneNumber = await vapiClient.createPhoneNumber(config);
+        const phoneNumber = await elevenLabsClient.addPhoneNumber(config);
+
+        // If we assigned to an agent, update the agent record
+        if (agentId && phoneNumber.phone_number_id) {
+            await Agent.findByIdAndUpdate(agentId, {
+                phoneNumberId: phoneNumber.phone_number_id
+            });
+        }
+
         res.json({ success: true, phoneNumber });
     } catch (error) {
         console.error('Error importing Twilio number:', error);
@@ -92,90 +120,44 @@ router.post('/twilio', async (req, res) => {
 });
 
 /**
- * POST /vapi/phone-numbers/vapi-sip
- * Create a Free Vapi SIP number
- */
-router.post('/vapi-sip', async (req, res) => {
-    try {
-        const { sipIdentifier, name, username, password } = req.body;
-
-        if (!sipIdentifier) {
-            return res.status(400).json({
-                success: false,
-                message: 'SIP Identifier is required'
-            });
-        }
-
-        const config = {
-            provider: 'vapi',
-            sipUri: `sip:${sipIdentifier}@sip.vapi.ai`,
-            name: name || sipIdentifier
-        };
-
-        // Add authentication if provided
-        if (username && password) {
-            config.authentication = { username, password };
-        }
-
-        console.log('User', req.userId, 'creating Vapi SIP:', sipIdentifier);
-
-        const phoneNumber = await vapiClient.createPhoneNumber(config);
-        res.json({ success: true, phoneNumber });
-    } catch (error) {
-        console.error('Error creating Vapi SIP:', error);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-/**
- * POST /vapi/phone-numbers/sip-trunk
- * Create a BYO SIP Trunk phone number (requires credential first)
- */
-router.post('/sip-trunk', async (req, res) => {
-    try {
-        const { number, credentialId, name, numberE164CheckEnabled } = req.body;
-
-        if (!number || !credentialId) {
-            return res.status(400).json({
-                success: false,
-                message: 'Phone number and SIP Trunk credential are required'
-            });
-        }
-
-        const config = {
-            provider: 'byo-phone-number',
-            number,
-            credentialId,
-            name: name || `SIP ${number}`,
-            numberE164CheckEnabled: numberE164CheckEnabled ?? false
-        };
-
-        console.log('User', req.userId, 'creating SIP trunk number:', number);
-
-        const phoneNumber = await vapiClient.createPhoneNumber(config);
-        res.json({ success: true, phoneNumber });
-    } catch (error) {
-        console.error('Error creating SIP Trunk number:', error);
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-/**
- * PATCH /vapi/phone-numbers/:id/assign
+ * PATCH /elevenlabs/phone-numbers/:id/assign
  * Assign a phone number to an agent
  */
 router.patch('/:id/assign', async (req, res) => {
     try {
         const { id } = req.params;
-        const { assistantId } = req.body;
+        const { agentId } = req.body;
 
-        const config = { assistantId: assistantId || null };
-        const phoneNumber = await vapiClient.updatePhoneNumber(id, config);
+        let elevenLabsAgentId = null;
+        let agent = null;
+
+        if (agentId) {
+            // Verify user owns this agent
+            agent = await Agent.findOne({ _id: agentId, userId: req.userId });
+            if (!agent) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Agent not found'
+                });
+            }
+            elevenLabsAgentId = agent.elevenLabsAgentId;
+        }
+
+        // Update in ElevenLabs
+        const phoneNumber = await elevenLabsClient.updatePhoneNumber(id, {
+            agent_id: elevenLabsAgentId
+        });
+
+        // Update agent record with phone number ID
+        if (agent) {
+            agent.phoneNumberId = id;
+            await agent.save();
+        }
 
         res.json({
             success: true,
             phoneNumber,
-            message: assistantId ? 'Phone number assigned to agent' : 'Phone number unassigned'
+            message: agentId ? 'Phone number assigned to agent' : 'Phone number unassigned'
         });
     } catch (error) {
         console.error('Error assigning phone number:', error);
@@ -184,13 +166,20 @@ router.patch('/:id/assign', async (req, res) => {
 });
 
 /**
- * DELETE /vapi/phone-numbers/:id
+ * DELETE /elevenlabs/phone-numbers/:id
  * Delete a phone number
  */
 router.delete('/:id', async (req, res) => {
     try {
         console.log('User', req.userId, 'deleting phone number:', req.params.id);
-        await vapiClient.deletePhoneNumber(req.params.id);
+
+        // Also remove from any agent that has this phone number
+        await Agent.updateMany(
+            { phoneNumberId: req.params.id, userId: req.userId },
+            { $unset: { phoneNumberId: 1 } }
+        );
+
+        await elevenLabsClient.deletePhoneNumber(req.params.id);
         res.json({ success: true, message: 'Phone number deleted' });
     } catch (error) {
         console.error('Error deleting phone number:', error);

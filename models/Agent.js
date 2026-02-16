@@ -1,4 +1,4 @@
-// Agent Model - MongoDB Schema for storing VAPI agent configurations
+// Agent Model - MongoDB Schema for storing ElevenLabs agent configurations
 
 const mongoose = require('mongoose');
 
@@ -11,8 +11,8 @@ const agentSchema = new mongoose.Schema({
         index: true
     },
 
-    // VAPI Assistant ID
-    vapiAssistantId: {
+    // ElevenLabs Agent ID
+    elevenLabsAgentId: {
         type: String,
         required: true,
         unique: true,
@@ -26,10 +26,17 @@ const agentSchema = new mongoose.Schema({
         trim: true
     },
 
-    // Full configuration object as stored in VAPI
+    // Full configuration object as stored in ElevenLabs
+    // Format: { conversation_config, platform_settings, name, tags }
     configuration: {
         type: mongoose.Schema.Types.Mixed,
         required: true
+    },
+
+    // Phone number ID assigned to this agent (if any)
+    phoneNumberId: {
+        type: String,
+        index: true
     },
 
     // Agent status

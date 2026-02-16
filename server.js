@@ -20,11 +20,10 @@ const cors = require('cors');
 // Import routes
 const agentRoutes = require('./routes/agents');
 const voiceRoutes = require('./routes/voices');
-const fileRoutes = require('./routes/files');
 const phoneNumberRoutes = require('./routes/phone-numbers');
-const credentialRoutes = require('./routes/credentials');
 const authRoutes = require('./routes/auth');
 const { authenticate } = require('./middleware/auth');
+const ElevenLabsAgentClient = require('./clients/elevenlabs-agent-client');
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-telecaller')
@@ -77,20 +76,20 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Mount agent routes
-app.use('/vapi/agents', agentRoutes);
-app.use('/vapi/voices', voiceRoutes);
-app.use('/vapi/files', fileRoutes);
-app.use('/vapi/phone-numbers', phoneNumberRoutes);
-app.use('/vapi/credentials', credentialRoutes);
+// Mount routes
+app.use('/elevenlabs/agents', agentRoutes);
+app.use('/elevenlabs/voices', voiceRoutes);
+app.use('/elevenlabs/phone-numbers', phoneNumberRoutes);
 app.use('/auth', authRoutes);
 
-const VAPI_KEY = process.env.VAPI_KEY;
-if (!VAPI_KEY) {
-  console.error('FATAL: VAPI_KEY environment variable is not set.');
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+if (!ELEVENLABS_API_KEY) {
+  console.error('FATAL: ELEVENLABS_API_KEY environment variable is not set.');
   process.exit(1);
 }
-const BASE = 'https://api.vapi.ai';
+
+// Initialize ElevenLabs client
+const elevenLabsClient = new ElevenLabsAgentClient(ELEVENLABS_API_KEY);
 
 // SECURED: Outbound call endpoint requires authentication
 app.post('/outbound-call', authenticate, async (req, res) => {
@@ -98,70 +97,78 @@ app.post('/outbound-call', authenticate, async (req, res) => {
     const { to, agentId } = req.body;
     if (!to) return res.status(400).json({ error: 'missing "to" phone number' });
 
-    let assistantId = process.env.VAPI_ASSISTANT_ID;
+    let elevenLabsAgentId;
     let agentName = 'Default Agent';
     let agentDbId = null;
 
-    // If custom agent is specified, verify ownership and use it
-    if (agentId) {
-      const Agent = require('./models/Agent');
-      // SECURITY: Verify user owns this agent
+    // Agent is required for ElevenLabs
+    if (!agentId) {
+      return res.status(400).json({ error: 'agentId is required' });
+    }
+
+    const Agent = require('./models/Agent');
+
+    // Check if this is a direct ElevenLabs agent ID or a MongoDB ID
+    const isElevenLabsDirectId = agentId.startsWith('agent_');
+
+    if (isElevenLabsDirectId) {
+      // Using an agent directly from ElevenLabs dashboard (not in our database)
+      console.log(`Using ElevenLabs agent directly: ${agentId}`);
+      elevenLabsAgentId = agentId;
+      agentName = 'ElevenLabs Agent (Direct)';
+      agentDbId = null; // Not in our database
+    } else {
+      // SECURITY: Verify user owns this agent from database
       const agent = await Agent.findOne({ _id: agentId, userId: req.userId });
 
       if (!agent) {
-        return res.status(404).json({ error: 'Agent not found' });
+        return res.status(404).json({ error: 'Agent not found in your account' });
       }
 
       if (agent.status !== 'active') {
         return res.status(400).json({ error: 'Agent is not active' });
       }
 
-      assistantId = agent.vapiAssistantId;
+      elevenLabsAgentId = agent.elevenLabsAgentId;
       agentName = agent.name;
       agentDbId = agent._id;
 
-      console.log(`User ${req.userId} using agent: ${agentName} (${assistantId})`);
-    } else {
-      console.log(`User ${req.userId} using default agent`);
+      // Update agent statistics
+      agent.statistics.lastUsed = new Date();
+      await agent.save();
     }
 
-    const payload = {
-      assistantId: assistantId,
-      phoneNumberId: process.env.VAPI_PHONE_ID,
-      customer: { number: to }
-    };
 
-    const r = await axios.post(`${BASE}/call`, payload, {
-      headers: {
-        Authorization: `Bearer ${VAPI_KEY}`,
-        'Content-Type': 'application/json'
-      }
-    });
+    console.log(`User ${req.userId} initiating call with agent: ${agentName} (${elevenLabsAgentId})`);
+
+    // Get ElevenLabs phone number ID from environment
+    const phoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
+    if (!phoneNumberId) {
+      return res.status(500).json({ error: 'ELEVENLABS_PHONE_NUMBER_ID not configured in environment variables' });
+    }
+
+    // Initiate call via ElevenLabs with phone number ID
+    const callData = await elevenLabsClient.initiateOutboundCall(elevenLabsAgentId, to, phoneNumberId);
+
 
     // Save to MongoDB with agent info AND userId
-    const callData = r.data;
     callData.userId = req.userId; // Associate call with user
     callData.agentId = agentDbId;
     callData.agentName = agentName;
+    callData._id = callData.conversation_id; // Use ElevenLabs conversation_id as our ID
+    callData.startedAt = new Date();
+    callData.customer = { number: to };
+    callData.status = 'initiated';
 
     const call = new Call(callData);
     await call.save();
 
-    // Update agent statistics if custom agent was used
-    if (agentDbId) {
-      const Agent = require('./models/Agent');
-      const agent = await Agent.findById(agentDbId);
-      if (agent) {
-        agent.statistics.lastUsed = new Date();
-        await agent.save();
-      }
-    }
-
-    return res.status(200).json(r.data);
+    return res.status(200).json(callData);
   } catch (err) {
     console.error('call error', err.response?.data || err.message);
     return res.status(500).json({ error: 'call failed', detail: err.response?.data || err.message });
   }
+
 });
 
 // SECURED: Get call info requires authentication and ownership check
@@ -170,26 +177,23 @@ app.get('/outbound-call-info/:id', authenticate, async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ error: 'missing call "id"' });
 
-    // First verify user owns this call
-    const existingCall = await Call.findById(id);
-    if (existingCall && existingCall.userId && !existingCall.userId.equals(req.userId)) {
+    // Fetch call from our database
+    const call = await Call.findById(id);
+
+    // Verify call exists and user owns it
+    if (!call) {
       return res.status(404).json({ error: 'Call not found' });
     }
 
-    const r = await axios.get(`${BASE}/call/${id}`, {
-      headers: {
-        Authorization: `Bearer ${VAPI_KEY}`,
-        'Content-Type': 'application/json'
-      }
-    });
+    if (call.userId && !call.userId.equals(req.userId)) {
+      return res.status(404).json({ error: 'Call not found' }); // Don't reveal it exists
+    }
 
-    // Update and save to MongoDB
-    await Call.findByIdAndUpdate(id, r.data, { upsert: true, new: true });
-
-    return res.status(200).json(r.data);
+    // Return the call data from our database
+    return res.status(200).json(call);
   } catch (err) {
-    console.error('call error', err.response?.data || err.message);
-    return res.status(500).json({ error: 'call failed', detail: err.response?.data || err.message });
+    console.error('Error fetching call info:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch call info', detail: err.message });
   }
 });
 
@@ -208,67 +212,50 @@ app.get('/calls/list', authenticate, async (req, res) => {
 // SECURED: Inbound calls list requires authentication
 app.get('/inbound-calls/list', authenticate, async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
-    const r = await axios.get(`${BASE}/call`, {
-      headers: {
-        Authorization: `Bearer ${VAPI_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
+    // Get calls from our own database filtered by user
+    const calls = await Call.find({ userId: req.userId, type: 'inbound' })
+      .sort({ createdAt: -1 })
+      .limit(100);
+
     console.log('User', req.userId, 'fetched inbound calls');
-    res.status(200).json(r.data);
+    res.status(200).json(calls);
   } catch (err) {
-    console.error('Failed to fetch inbound calls', err.response?.data || err.message);
-    res.status(500).json({ error: 'Failed to fetch inbound calls', detail: err.response?.data || err.message });
+    console.error('Failed to fetch inbound calls', err.message);
+    res.status(500).json({ error: 'Failed to fetch inbound calls', detail: err.message });
   }
 });
 
-// 2) Webhook endpoint for Vapi server events & function/tool calls
-// Set this URL as the assistant/tool/server URL in dashboard or via API
-app.post('/vapi/webhook', async (req, res) => {
+// Webhook endpoint for ElevenLabs conversation events
+app.post('/elevenlabs/webhook', async (req, res) => {
   try {
-    const msg = req.body.message || {};
-    // Tool calls
-    if (msg.type === 'tool-calls') {
-      const toolCalls = msg.toolCallList || [];
-      const results = [];
+    const event = req.body;
+    console.log('ElevenLabs webhook event:', event.type || event.event_type);
 
-      for (const tc of toolCalls) {
-        // Example: implement your own logic per tc.name and tc.arguments
-        if (tc.name === 'lookup_customer') {
-          const email = tc.arguments?.email;
-          // lookup in your DB...
-          const customer = { name: 'Jane Doe', preferred_language: 'fr', accountStatus: 'active' };
-          results.push({ toolCallId: tc.id, result: customer });
-        } else {
-          // default/no-op
-          results.push({ toolCallId: tc.id, result: null });
-        }
-      }
+    // Handle conversation end events
+    if (event.type === 'conversation.end' || event.event_type === 'conversation_end') {
+      const conversationId = event.conversation_id;
 
-      // IMPORTANT: reply with results array so Vapi can resume conversation
-      return res.json({ results });
-    }
-
-    // End-of-call report (store transcript/summary, etc)
-    if (msg.type === 'end-of-call-report') {
-      const call = msg.call || {};
-      console.log('call ended', call.id, 'summary:', msg.artifact?.summary);
-      // persist call metadata to DB...
-      await Call.findByIdAndUpdate(call.id, {
+      await Call.findByIdAndUpdate(conversationId, {
         status: 'ended',
-        summary: msg.artifact?.summary,
         endedAt: new Date(),
-        transcript: msg.artifact?.transcript,
-        recordingUrl: msg.artifact?.recordingUrl,
+        transcript: event.transcript,
+        summary: event.summary,
+        recordingUrl: event.recording_url
       });
+
       return res.status(200).send('ok');
     }
 
-    // Status updates, transcript updates, other event types
-    if (msg.type === 'status-update' || msg.type === 'transcript-update') {
-      // handle as needed
-      console.log('vapi event', msg.type, req.body);
+    // Handle conversation updates
+    if (event.type === 'conversation.update' || event.event_type === 'conversation_update') {
+      const conversationId = event.conversation_id;
+
+      await Call.findByIdAndUpdate(conversationId, {
+        transcript: event.transcript,
+        messages: event.messages,
+        status: event.status
+      });
+
       return res.status(200).send('ok');
     }
 
