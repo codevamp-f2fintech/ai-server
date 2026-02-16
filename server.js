@@ -178,7 +178,7 @@ app.get('/outbound-call-info/:id', authenticate, async (req, res) => {
     if (!id) return res.status(400).json({ error: 'missing call "id"' });
 
     // Fetch call from our database
-    const call = await Call.findById(id);
+    let call = await Call.findById(id);
 
     // Verify call exists and user owns it
     if (!call) {
@@ -189,7 +189,47 @@ app.get('/outbound-call-info/:id', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Call not found' }); // Don't reveal it exists
     }
 
-    // Return the call data from our database
+    // Try to fetch latest details from cloud API
+    try {
+      console.log(`Fetching fresh conversation details from cloud for: ${id}`);
+      const conversationDetails = await elevenLabsClient.getConversationDetails(id);
+
+      // Update call with latest details from cloud
+      if (conversationDetails) {
+        console.log('Conversation details received:', JSON.stringify(conversationDetails, null, 2));
+
+        // Map cloud conversation data to our Call schema
+        const updates = {
+          status: conversationDetails.status || call.status,
+          endedAt: conversationDetails.end_timestamp ? new Date(conversationDetails.end_timestamp * 1000) : call.endedAt,
+          // Store metadata including transcript
+          metadata: conversationDetails
+        };
+
+        // Extract transcript if available
+        if (conversationDetails.transcript && Array.isArray(conversationDetails.transcript)) {
+          // Convert transcript array to readable text
+          const transcriptText = conversationDetails.transcript
+            .map(item => `${item.role}: ${item.message}`)
+            .join('\n');
+          updates.transcript = transcriptText;
+        }
+
+        // Extract recording URL if available
+        if (conversationDetails.recording_url) {
+          updates.recordingUrl = conversationDetails.recording_url;
+        }
+
+        // Update in database
+        call = await Call.findByIdAndUpdate(id, updates, { new: true });
+        console.log('Call updated with cloud conversation details');
+      }
+    } catch (cloudError) {
+      // If cloud fetch fails, just log and return what we have in DB
+      console.warn('Could not fetch fresh details from cloud:', cloudError.message);
+    }
+
+    // Return the call data (either fresh or from DB)
     return res.status(200).json(call);
   } catch (err) {
     console.error('Error fetching call info:', err.message);
