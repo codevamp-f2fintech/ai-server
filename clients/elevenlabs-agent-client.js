@@ -221,16 +221,30 @@ class ElevenLabsAgentClient {
      * @param {string} agentPhoneNumberId - ElevenLabs phone number ID (from Twilio integration)
      * @returns {Promise<Object>} Call initiation data
      */
-    async initiateOutboundCall(agentId, phoneNumber, agentPhoneNumberId) {
+    async initiateOutboundCall(agentId, phoneNumber, agentPhoneNumberId, variables) {
         try {
             console.log(`Initiating outbound call with agent ${agentId} to ${phoneNumber}`);
             console.log(`Using phone number ID: ${agentPhoneNumberId}`);
 
-            const response = await this.client.post('/v1/convai/twilio/outbound-call', {
+            const payload = {
                 agent_id: agentId,
                 to_number: phoneNumber,
                 agent_phone_number_id: agentPhoneNumberId
-            });
+            };
+
+            // Add dynamic variables if provided
+            if (variables && Object.keys(variables).length > 0) {
+                console.log('Adding dynamic variables:', JSON.stringify(variables));
+                payload.conversation_config_override = {
+                    agent: {
+                        prompt: {
+                            variables: variables
+                        }
+                    }
+                };
+            }
+
+            const response = await this.client.post('/v1/convai/twilio/outbound-call', payload);
 
             console.log('Outbound call initiated successfully');
             console.log('Response:', JSON.stringify(response.data, null, 2));

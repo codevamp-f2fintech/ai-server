@@ -94,7 +94,7 @@ const elevenLabsClient = new ElevenLabsAgentClient(ELEVENLABS_API_KEY);
 // SECURED: Outbound call endpoint requires authentication
 app.post('/outbound-call', authenticate, async (req, res) => {
   try {
-    const { to, agentId } = req.body;
+    const { to, agentId, variables } = req.body;
     if (!to) return res.status(400).json({ error: 'missing "to" phone number' });
 
     let elevenLabsAgentId;
@@ -148,7 +148,7 @@ app.post('/outbound-call', authenticate, async (req, res) => {
     }
 
     // Initiate call via ElevenLabs with phone number ID
-    const callData = await elevenLabsClient.initiateOutboundCall(elevenLabsAgentId, to, phoneNumberId);
+    const callData = await elevenLabsClient.initiateOutboundCall(elevenLabsAgentId, to, phoneNumberId, variables);
 
 
     // Save to MongoDB with agent info AND userId
