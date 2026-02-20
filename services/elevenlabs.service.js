@@ -34,6 +34,7 @@ class ElevenLabsService {
      * @returns {Promise<void>}
      */
     async textToSpeechStream(text, config, onAudioChunk) {
+        this._stopped = false;
         try {
             // Ensure config exists with defaults
             config = config || {};

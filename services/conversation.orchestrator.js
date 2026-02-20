@@ -109,6 +109,11 @@ class ConversationOrchestrator extends EventEmitter {
 
         console.log(`[Orchestrator] User said: ${transcript}`);
 
+        // Stop current TTS generation to avoid overlapping if the user interrupts
+        if (this.elevenlabs) {
+            this.elevenlabs.stop();
+        }
+
         // Log conversation
         this.conversationLog.push({
             role: 'user',

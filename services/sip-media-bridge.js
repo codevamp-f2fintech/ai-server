@@ -159,10 +159,16 @@ class SipMediaBridge {
 
         orchestrator.on('user_speech', (transcript) => {
             console.log(`[SipMediaBridge] [${internalCallId}] User said: ${transcript}`);
+            if (session.sipService && session.sipCallId) {
+                session.sipService.clearAudioQueue(session.sipCallId);
+            }
         });
 
         orchestrator.on('thinking', () => {
             console.log(`[SipMediaBridge] [${internalCallId}] AI thinking...`);
+            if (session.sipService && session.sipCallId) {
+                session.sipService.clearAudioQueue(session.sipCallId);
+            }
         });
 
         orchestrator.on('speaking', (text) => {

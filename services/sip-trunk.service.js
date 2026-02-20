@@ -345,15 +345,17 @@ class SipTrunkService extends EventEmitter {
     /**
      * Create SIP ACK request
      */
-    createAckRequest(toNumber, callId, fromTag, toTag, cseq, localIp) {
-        const uri = `sip:${toNumber}@${this.serverIp}:${this.port}`;
+    createAckRequest(toNumber, callId, fromTag, toTag, cseq, localIp, localSipPort = 5060) {
+        let cleanTo = toNumber.replace(/^\+/, '');
+        if (cleanTo.startsWith('91') && cleanTo.length > 10) cleanTo = cleanTo.substring(2);
+        const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
         const fromUri = `sip:${this.fromNumber}@${this.serverIp}`;
         const toUri = `sip:${toNumber}@${this.serverIp}`;
         const branch = this.generateBranch();
 
         return [
             `ACK ${uri} SIP/2.0`,
-            `Via: SIP/2.0/UDP ${localIp}:${this.localSipPort};rport;branch=${branch}`,
+            `Via: SIP/2.0/UDP ${localIp}:${localSipPort};rport;branch=${branch}`,
             `Max-Forwards: 70`,
             `From: <${fromUri}>;tag=${fromTag}`,
             `To: <${toUri}>;tag=${toTag}`,
@@ -368,8 +370,9 @@ class SipTrunkService extends EventEmitter {
     /**
      * Create SIP BYE request
      */
-    createByeRequest(toNumber, callId, fromTag, toTag, cseq, localIp) {
-        const cleanTo = toNumber.replace(/^\+/, '');
+    createByeRequest(toNumber, callId, fromTag, toTag, cseq, localIp, localSipPort = 5060) {
+        let cleanTo = toNumber.replace(/^\+/, '');
+        if (cleanTo.startsWith('91') && cleanTo.length > 10) cleanTo = cleanTo.substring(2);
         const cleanFrom = this.fromNumber.replace(/^\+/, '');
         const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
         const fromUri = `sip:${cleanFrom}@${this.serverIp}`;
@@ -378,7 +381,7 @@ class SipTrunkService extends EventEmitter {
 
         return [
             `BYE ${uri} SIP/2.0`,
-            `Via: SIP/2.0/UDP ${localIp}:${this.localSipPort};rport;branch=${branch}`,
+            `Via: SIP/2.0/UDP ${localIp}:${localSipPort};rport;branch=${branch}`,
             `Max-Forwards: 70`,
             `From: <${fromUri}>;tag=${fromTag}`,
             `To: <${toUri}>;tag=${toTag}`,
@@ -766,8 +769,14 @@ class SipTrunkService extends EventEmitter {
                             callData.sdpRerouteOccurred = true; // Permanently disable symmetric RTP
                             console.log(`[SipTrunk] RTP endpoint updated (SDP): ${oldIp}:${oldPort} -> ${callData.remoteRtpIp}:${callData.remoteRtpPort}`);
                         } else {
-                            console.log('[SipTrunk] 200 OK already processed, ignoring duplicate');
+                            console.log('[SipTrunk] 200 OK already processed, ignoring duplicate (but resending ACK)');
                         }
+
+                        // Resend ACK for duplicate 200 OK (important to avoid provider timeout)
+                        const ack = this.createAckRequest(
+                            toNumber, callId, fromTag, callData.toTag || response.toTag, callData.cseq, localIp, callData.localSipPort
+                        );
+                        socket.send(ack, this.port, this.serverIp);
                         return;
                     }
                     callData.answered = true;
@@ -791,7 +800,7 @@ class SipTrunkService extends EventEmitter {
 
                     // Send ACK
                     const ack = this.createAckRequest(
-                        toNumber, callId, fromTag, response.toTag, callData.cseq, localIp
+                        toNumber, callId, fromTag, response.toTag, callData.cseq, localIp, callData.localSipPort
                     );
                     socket.send(ack, this.port, this.serverIp);
 
@@ -1083,7 +1092,8 @@ class SipTrunkService extends EventEmitter {
             callData.fromTag,
             callData.toTag,
             ++callData.cseq,
-            localIp
+            localIp,
+            callData.localSipPort
         );
 
         callData.socket.send(bye, this.port, this.serverIp, () => {
@@ -1096,6 +1106,22 @@ class SipTrunkService extends EventEmitter {
         this.activeCalls.delete(callId);
 
         this.emit('ended', { callId, internalCallId: callData.internalCallId });
+    }
+
+    /**
+     * Clear the audio queue (stop current playback)
+     */
+    clearAudioQueue(callId) {
+        const callData = this.activeCalls.get(callId);
+        if (callData) {
+            if (callData.audioSendInterval) {
+                clearInterval(callData.audioSendInterval);
+                callData.audioSendInterval = null;
+            }
+            callData.audioQueue = [];
+            callData.isSendingAudio = false;
+            callData.lastAudioSentTime = Date.now();
+        }
     }
 
     /**
