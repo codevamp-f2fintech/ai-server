@@ -58,8 +58,8 @@ class ElevenLabsService {
             // Only add voice_settings for non-v3 models
             if (!isV3) {
                 const voiceSettings = {
-                    stability: config.stability || 0.5,
-                    similarity_boost: config.similarity_boost || config.similarityBoost || 0.75,
+                    stability: config.stability || 0.75,       // Higher = more consistent, cleaner for telephony
+                    similarity_boost: config.similarity_boost || config.similarityBoost || 0.85,
                     use_speaker_boost: true,
                     style: 0
                 };

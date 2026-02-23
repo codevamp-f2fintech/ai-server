@@ -6,6 +6,25 @@ const GeminiService = require('./gemini.service');
 const ElevenLabsService = require('./elevenlabs.service');
 const EventEmitter = require('events');
 
+/**
+ * Strip Markdown formatting from text before TTS
+ * Asterisks, underscores, headers etc. cause noise/clicks in ElevenLabs
+ */
+function stripMarkdown(text) {
+    return text
+        .replace(/\*\*(.+?)\*\*/g, '$1')   // **bold** -> bold
+        .replace(/\*(.+?)\*/g, '$1')         // *italic* -> italic
+        .replace(/__(.+?)__/g, '$1')          // __bold__ -> bold
+        .replace(/_(.+?)_/g, '$1')            // _italic_ -> italic
+        .replace(/#{1,6}\s+/g, '')            // ## heading -> heading
+        .replace(/\[(.+?)\]\(.+?\)/g, '$1')  // [link](url) -> link
+        .replace(/`{1,3}[^`]*`{1,3}/g, '')    // `code` -> (removed)
+        .replace(/^\s*[-*+]\s+/gm, '')         // - bullet -> (removed)
+        .replace(/^\s*\d+\.\s+/gm, '')        // 1. list -> (removed)
+        .replace(/\n{3,}/g, '\n\n')           // Collapse extra blank lines
+        .trim();
+}
+
 class ConversationOrchestrator extends EventEmitter {
     constructor(agentConfig, apiKeys) {
         super();
@@ -210,17 +229,21 @@ class ConversationOrchestrator extends EventEmitter {
             return;
         }
 
+        // Strip Markdown formatting - asterisks, headers etc. create noise in TTS
+        const cleanText = stripMarkdown(text);
+        if (!cleanText) return;
+
         this.state = 'speaking';
-        this.emit('speaking', text);
+        this.emit('speaking', cleanText);
 
         // Clear any pending transcripts to avoid processing stale audio
         this.deepgram.clearBuffer();
 
-        console.log(`[Orchestrator] Speaking: ${text}`);
+        console.log(`[Orchestrator] Speaking: ${cleanText}`);
 
         try {
             await this.elevenlabs.textToSpeechStream(
-                text,
+                cleanText,
                 this.agentConfig.voice,
                 (audioChunk) => this.onAudioChunk(audioChunk)
             );
