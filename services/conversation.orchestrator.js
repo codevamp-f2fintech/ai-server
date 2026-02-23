@@ -248,6 +248,11 @@ class ConversationOrchestrator extends EventEmitter {
                 (audioChunk) => this.onAudioChunk(audioChunk)
             );
 
+            // Signal that TTS is done so any carry-buffer remainder gets flushed to RTP
+            if (!this._aborted) {
+                this.emit('audio_flush');
+            }
+
             // CRITICAL: Only transition to listening if call is still alive
             if (!this._aborted) {
                 this.state = 'listening';

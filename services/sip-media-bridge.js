@@ -144,6 +144,12 @@ class SipMediaBridge {
             sipService.sendAudio(sipCallId, audioChunk);
         });
 
+        // When TTS stream ends, flush any remaining carry-buffer bytes as a final padded packet
+        orchestrator.on('audio_flush', () => {
+            if (!this.activeSessions.has(internalCallId)) return;
+            sipService.flushCarryBuffer(sipCallId);
+        });
+
         console.log(`[SipMediaBridge] Outgoing audio handler set up for ${internalCallId}`);
     }
 

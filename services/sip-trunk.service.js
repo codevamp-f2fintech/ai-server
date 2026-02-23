@@ -1100,11 +1100,24 @@ class SipTrunkService extends EventEmitter {
         if (!callData.audioQueue) {
             callData.audioQueue = [];
         }
+        if (!callData.audioCarryBuffer) {
+            callData.audioCarryBuffer = Buffer.alloc(0);
+        }
 
-        while (offset < processedAudio.length) {
-            const chunk = processedAudio.slice(offset, Math.min(offset + CHUNK_SIZE, processedAudio.length));
-            callData.audioQueue.push(chunk);
-            offset += CHUNK_SIZE;
+        // Prepend any leftover bytes from the previous sendAudio call
+        // This ensures we never send partial (< 160 byte) RTP frames in the middle of a stream
+        const combined = Buffer.concat([callData.audioCarryBuffer, processedAudio]);
+        callData.audioCarryBuffer = Buffer.alloc(0);
+
+        let off2 = 0;
+        while (off2 + CHUNK_SIZE <= combined.length) {
+            callData.audioQueue.push(combined.slice(off2, off2 + CHUNK_SIZE));
+            off2 += CHUNK_SIZE;
+        }
+
+        // Keep remaining bytes for next call to join with (avoids short intermediate frames)
+        if (off2 < combined.length) {
+            callData.audioCarryBuffer = Buffer.from(combined.slice(off2));
         }
 
         // Start the pacing timer if not already running
@@ -1123,6 +1136,15 @@ class SipTrunkService extends EventEmitter {
 
                 const chunk = callData.audioQueue.shift();
 
+                // Pad to exactly 160 bytes with codec-correct silence if needed
+                // (handles the very last chunk of a TTS burst that didn't fill a full frame)
+                let frameChunk = chunk;
+                if (chunk.length < CHUNK_SIZE) {
+                    const silenceByte = callData.remoteCodec === 8 ? 0xD5 : 0xFF;
+                    frameChunk = Buffer.alloc(CHUNK_SIZE, silenceByte);
+                    chunk.copy(frameChunk, 0);
+                }
+
                 // Create RTP packet
                 const header = Buffer.alloc(12);
                 header.writeUInt8(0x80, 0); // Version 2, no padding, no extension, no CSRC
@@ -1135,10 +1157,10 @@ class SipTrunkService extends EventEmitter {
                 header.writeUInt32BE(callData.rtpTimestamp, 4);
                 header.writeUInt32BE(callData.ssrc, 8);
 
-                const rtpPacket = Buffer.concat([header, chunk]);
+                const rtpPacket = Buffer.concat([header, frameChunk]);
 
-                // Update timestamp (8000 Hz, 160 samples per 20ms packet)
-                callData.rtpTimestamp += chunk.length;
+                // Always advance by exactly 160 samples (20ms) to keep clock grid aligned
+                callData.rtpTimestamp += CHUNK_SIZE;
 
                 // Send to remote RTP endpoint
                 const targetIp = callData.remoteRtpIp || this.serverIp;
@@ -1158,6 +1180,54 @@ class SipTrunkService extends EventEmitter {
                     console.log(`[SipTrunk] Sent RTP audio #${callData.rtpSendCount} to ${targetIp}:${targetPort}`);
                 }
             }, 20); // 20ms interval for 8kHz audio
+        }
+    }
+
+    /**
+     * Flush any remaining carry-buffer bytes as a final padded RTP packet.
+     * Called after ElevenLabs TTS stream completes to avoid losing the tail.
+     */
+    flushCarryBuffer(callId) {
+        const callData = this.activeCalls.get(callId);
+        if (!callData || !callData.audioCarryBuffer || callData.audioCarryBuffer.length === 0) return;
+        if (callData.callEnded) return;
+
+        const CHUNK_SIZE = 160;
+        const silenceByte = callData.remoteCodec === 8 ? 0xD5 : 0xFF;
+        const frameChunk = Buffer.alloc(CHUNK_SIZE, silenceByte);
+        callData.audioCarryBuffer.copy(frameChunk, 0);
+        callData.audioCarryBuffer = Buffer.alloc(0);
+
+        // Convert if needed
+        const payload = callData.remoteCodec === 8 ? ulawToAlaw(frameChunk) : frameChunk;
+
+        if (!callData.audioQueue) callData.audioQueue = [];
+        callData.audioQueue.push(payload);
+
+        // Start pacing timer if not already running
+        if (!callData.audioSendInterval) {
+            callData.isSendingAudio = true;
+            callData.audioSendInterval = setInterval(() => {
+                if (!callData.audioQueue || callData.audioQueue.length === 0) {
+                    clearInterval(callData.audioSendInterval);
+                    callData.audioSendInterval = null;
+                    callData.isSendingAudio = false;
+                    callData.lastAudioSentTime = Date.now();
+                    return;
+                }
+                const chunk = callData.audioQueue.shift();
+                const header = Buffer.alloc(12);
+                header.writeUInt8(0x80, 0);
+                header.writeUInt8(callData.remoteCodec || 0x00, 1);
+                header.writeUInt16BE(callData.rtpSequence++ & 0xFFFF, 2);
+                header.writeUInt32BE(callData.rtpTimestamp, 4);
+                header.writeUInt32BE(callData.ssrc, 8);
+                callData.rtpTimestamp += CHUNK_SIZE;
+                const rtpPacket = Buffer.concat([header, chunk]);
+                const targetIp = callData.remoteRtpIp || this.serverIp;
+                const targetPort = callData.remoteRtpPort || callData.rtpPort;
+                try { callData.rtpSocket.send(rtpPacket, targetPort, targetIp); } catch (e) { }
+            }, 20);
         }
     }
 
