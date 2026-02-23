@@ -30,11 +30,14 @@ class SipMediaBridge {
 
         try {
             // Create ConversationOrchestrator with agent config
+            // Note: transcriber.encoding will be patched after first RTP packet reveals the codec
+            const transcriberConfig = { ...(agent.transcriber || {}) };
+
             const orchestrator = new ConversationOrchestrator(
                 {
                     model: agent.model || {},
                     voice: agent.voice || {},
-                    transcriber: agent.transcriber || {},
+                    transcriber: transcriberConfig,
                     firstMessage: agent.firstMessage || 'Hello! How can I help you today?',
                     firstMessageMode: agent.firstMessageMode || 'assistant-speaks-first',
                     maxDurationSeconds: agent.maxDurationSeconds || 600,
@@ -51,6 +54,7 @@ class SipMediaBridge {
                 sipService,
                 orchestrator,
                 agent,
+                transcriberConfig,  // mutable ref so setupIncomingAudio can patch it
                 startTime: Date.now(),
                 audioPacketCount: 0,
                 ttsPacketCount: 0
@@ -74,6 +78,13 @@ class SipMediaBridge {
             // Set up orchestrator event handlers
             this.setupOrchestratorEvents(session);
 
+            // Pre-seed Deepgram encoding from the already-negotiated SDP codec
+            // (sipService already parsed the 200 OK SDP before this bridge was created)
+            // 0=PCMU → 'mulaw', 8=PCMA → 'alaw'
+            const remoteCodec = sipService.getCallCodec(sipCallId);
+            transcriberConfig.encoding = (remoteCodec === 8) ? 'alaw' : 'mulaw';
+            console.log(`[SipMediaBridge] Deepgram encoding pre-seeded: '${transcriberConfig.encoding}' (remote codec ${remoteCodec})`);
+
             // Start the conversation (this will trigger first message if configured)
             await orchestrator.start();
 
@@ -89,14 +100,25 @@ class SipMediaBridge {
      * Set up incoming audio from SIP to Orchestrator
      */
     setupIncomingAudio(session) {
-        const { sipService, orchestrator, internalCallId, sipCallId } = session;
+        const { sipService, orchestrator, internalCallId, sipCallId, transcriberConfig } = session;
 
         // Listen for audio_in events from SipTrunkService
-        const audioInHandler = ({ callId, audio }) => {
+        const audioInHandler = ({ callId, audio, codec }) => {
             // Only process audio for this call
             if (callId !== sipCallId) return;
 
             session.audioPacketCount++;
+
+            // On FIRST packet: patch Deepgram encoding to match negotiated codec
+            // Deepgram natively supports both 'mulaw' (PT=0) and 'alaw' (PT=8)
+            // so we feed raw audio without any codec conversion
+            if (session.audioPacketCount === 1) {
+                const encoding = (codec === 8) ? 'alaw' : 'mulaw';
+                if (transcriberConfig.encoding !== encoding) {
+                    transcriberConfig.encoding = encoding;
+                    console.log(`[SipMediaBridge] Transcriber encoding set to '${encoding}' (remote codec ${codec})`);
+                }
+            }
 
             // Debug log every 100 packets (2 seconds of audio)
             if (session.audioPacketCount === 1 || session.audioPacketCount % 100 === 0) {

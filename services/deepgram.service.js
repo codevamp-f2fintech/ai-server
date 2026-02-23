@@ -35,7 +35,7 @@ class DeepgramService {
             interim_results: true,
             smart_format: true,
             numerals: config.numerals !== false,
-            encoding: 'mulaw',    // SIP sends μ-law audio directly
+            encoding: config.encoding || 'mulaw',  // 'alaw' for PCMA (codec 8), 'mulaw' for PCMU (codec 0)
             sample_rate: 8000,    // 8kHz for telephony
             channels: 1,
             endpointing: 300,     // Detect utterance end after 300ms of silence

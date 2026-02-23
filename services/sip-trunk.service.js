@@ -983,17 +983,15 @@ class SipTrunkService extends EventEmitter {
             // RTP packet received from remote party
             // Skip RTP header (12 bytes) to get audio payload
             if (data.length > 12) {
-                let audioPayload = data.slice(12);
-
-                // Decode A-law to U-law (Deepgram expects format=mulaw)
-                if (callData.remoteCodec === 8) {
-                    audioPayload = alawToUlaw(audioPayload);
-                }
-
+                const audioPayload = data.slice(12);
+                // Emit raw audio with codec type - no conversion needed.
+                // DeepgramService will be told the correct encoding (alaw or mulaw)
+                // so it handles the codec natively without any table conversion.
                 this.emit('audio_in', {
                     callId: callData.callId,
                     internalCallId: callData.internalCallId,
-                    audio: audioPayload
+                    audio: audioPayload,
+                    codec: callData.remoteCodec || 0  // 0=PCMU, 8=PCMA
                 });
             }
         });
@@ -1229,6 +1227,19 @@ class SipTrunkService extends EventEmitter {
                 try { callData.rtpSocket.send(rtpPacket, targetPort, targetIp); } catch (e) { }
             }, 20);
         }
+    }
+
+    /**
+     * Get the negotiated RTP codec for a call (0=PCMU, 8=PCMA)
+     */
+    getCallCodec(sipCallId) {
+        // sipCallId can be either the SIP Call-ID or the internal internalCallId
+        for (const [, cd] of this.activeCalls) {
+            if (cd.callId === sipCallId || cd.internalCallId === sipCallId) {
+                return cd.remoteCodec || 0;
+            }
+        }
+        return 0; // default PCMU
     }
 
     /**
