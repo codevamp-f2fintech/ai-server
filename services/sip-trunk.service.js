@@ -27,6 +27,27 @@ const ULAW_TO_ALAW = [
     210, 211, 208, 209, 214, 215, 212, 213, 250, 251, 248, 249, 254, 255, 252, 253
 ];
 
+// A-law to μ-law conversion table (ITU-T G.711)
+// This converts A-law (PCMA, codec 8) to μ-law (PCMU, codec 0)
+const ALAW_TO_ULAW = [
+    42, 43, 40, 41, 46, 47, 44, 45, 34, 35, 32, 33, 38, 39, 36, 37,
+    58, 59, 56, 57, 62, 63, 60, 61, 50, 51, 48, 49, 54, 55, 52, 53,
+    10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5,
+    26, 27, 24, 25, 30, 31, 28, 29, 18, 19, 16, 17, 22, 23, 20, 21,
+    98, 99, 96, 97, 102, 103, 100, 101, 90, 91, 88, 89, 94, 95, 92, 93,
+    114, 115, 112, 113, 118, 119, 116, 117, 106, 107, 104, 105, 110, 111, 108, 109,
+    66, 67, 64, 65, 70, 71, 68, 69, 74, 75, 72, 73, 78, 79, 76, 77,
+    82, 83, 80, 81, 86, 87, 84, 85, 122, 123, 120, 121, 126, 127, 124, 125,
+    170, 171, 168, 169, 174, 175, 172, 173, 162, 163, 160, 161, 166, 167, 164, 165,
+    186, 187, 184, 185, 190, 191, 188, 189, 178, 179, 176, 177, 182, 183, 180, 181,
+    138, 139, 136, 137, 142, 143, 140, 141, 130, 131, 128, 129, 134, 135, 132, 133,
+    154, 155, 152, 153, 158, 159, 156, 157, 146, 147, 144, 145, 150, 151, 148, 149,
+    226, 227, 224, 225, 230, 231, 228, 229, 218, 219, 216, 217, 222, 223, 220, 221,
+    242, 243, 240, 241, 246, 247, 244, 245, 234, 235, 232, 233, 238, 239, 236, 237,
+    194, 195, 192, 193, 198, 199, 196, 197, 202, 203, 200, 201, 206, 207, 204, 205,
+    210, 211, 208, 209, 214, 215, 212, 213, 250, 251, 248, 249, 254, 255, 252, 253
+];
+
 // Convert μ-law buffer to A-law buffer
 function ulawToAlaw(ulawBuffer) {
     const alawBuffer = Buffer.alloc(ulawBuffer.length);
@@ -34,6 +55,15 @@ function ulawToAlaw(ulawBuffer) {
         alawBuffer[i] = ULAW_TO_ALAW[ulawBuffer[i]];
     }
     return alawBuffer;
+}
+
+// Convert A-law buffer to μ-law buffer
+function alawToUlaw(alawBuffer) {
+    const ulawBuffer = Buffer.alloc(alawBuffer.length);
+    for (let i = 0; i < alawBuffer.length; i++) {
+        ulawBuffer[i] = ALAW_TO_ULAW[alawBuffer[i]];
+    }
+    return ulawBuffer;
 }
 
 class SipTrunkService extends EventEmitter {
@@ -345,52 +375,80 @@ class SipTrunkService extends EventEmitter {
     /**
      * Create SIP ACK request
      */
-    createAckRequest(toNumber, callId, fromTag, toTag, cseq, localIp, localSipPort = 5060) {
+    createAckRequest(toNumber, callId, fromTag, toTag, cseq, localIp, localSipPort = 5060, contactUri = null, routeHeader = null) {
         let cleanTo = toNumber.replace(/^\+/, '');
         if (cleanTo.startsWith('91') && cleanTo.length > 10) cleanTo = cleanTo.substring(2);
-        const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
+
+        let uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
+        if (contactUri) {
+            uri = contactUri.startsWith('sip:') ? contactUri : `sip:${contactUri}`;
+        }
+
         const fromUri = `sip:${this.fromNumber}@${this.serverIp}`;
         const toUri = `sip:${toNumber}@${this.serverIp}`;
         const branch = this.generateBranch();
 
-        return [
+        const request = [
             `ACK ${uri} SIP/2.0`,
             `Via: SIP/2.0/UDP ${localIp}:${localSipPort};rport;branch=${branch}`,
             `Max-Forwards: 70`,
             `From: <${fromUri}>;tag=${fromTag}`,
             `To: <${toUri}>;tag=${toTag}`,
             `Call-ID: ${callId}`,
-            `CSeq: ${cseq} ACK`,
+            `CSeq: ${cseq} ACK`
+        ];
+
+        if (routeHeader) {
+            request.push(`Route: ${routeHeader}`);
+        }
+
+        request.push(
             `Content-Length: 0`,
             '',
             ''
-        ].join('\r\n');
+        );
+
+        return request.join('\r\n');
     }
 
     /**
      * Create SIP BYE request
      */
-    createByeRequest(toNumber, callId, fromTag, toTag, cseq, localIp, localSipPort = 5060) {
+    createByeRequest(toNumber, callId, fromTag, toTag, cseq, localIp, localSipPort = 5060, contactUri = null, routeHeader = null) {
         let cleanTo = toNumber.replace(/^\+/, '');
         if (cleanTo.startsWith('91') && cleanTo.length > 10) cleanTo = cleanTo.substring(2);
         const cleanFrom = this.fromNumber.replace(/^\+/, '');
-        const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
+
+        let uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
+        if (contactUri) {
+            uri = contactUri.startsWith('sip:') ? contactUri : `sip:${contactUri}`;
+        }
+
         const fromUri = `sip:${cleanFrom}@${this.serverIp}`;
         const toUri = `sip:${cleanTo}@${this.serverIp}`;
         const branch = this.generateBranch();
 
-        return [
+        const request = [
             `BYE ${uri} SIP/2.0`,
             `Via: SIP/2.0/UDP ${localIp}:${localSipPort};rport;branch=${branch}`,
             `Max-Forwards: 70`,
             `From: <${fromUri}>;tag=${fromTag}`,
             `To: <${toUri}>;tag=${toTag}`,
             `Call-ID: ${callId}`,
-            `CSeq: ${cseq} BYE`,
+            `CSeq: ${cseq} BYE`
+        ];
+
+        if (routeHeader) {
+            request.push(`Route: ${routeHeader}`);
+        }
+
+        request.push(
             `Content-Length: 0`,
             '',
             ''
-        ].join('\r\n');
+        );
+
+        return request.join('\r\n');
     }
 
     /**
@@ -501,7 +559,11 @@ class SipTrunkService extends EventEmitter {
             if (colonIdx > 0) {
                 const key = line.substring(0, colonIdx).trim().toLowerCase();
                 const value = line.substring(colonIdx + 1).trim();
-                response.headers[key] = value;
+                if (response.headers[key]) {
+                    response.headers[key] += `, ${value}`; // Handle multiple headers (e.g. Record-Route)
+                } else {
+                    response.headers[key] = value;
+                }
             }
         }
 
@@ -521,6 +583,22 @@ class SipTrunkService extends EventEmitter {
         if (response.headers['to']) {
             const toTagMatch = response.headers['to'].match(/tag=([^;>]+)/);
             if (toTagMatch) response.toTag = toTagMatch[1];
+        }
+
+        // Parse Contact URI
+        if (response.headers['contact']) {
+            const contactMatch = response.headers['contact'].match(/<([^>]+)>/);
+            if (contactMatch) {
+                response.contactUri = contactMatch[1];
+            } else {
+                // Sometime Contact is just the URI
+                response.contactUri = response.headers['contact'].trim();
+            }
+        }
+
+        // Parse Record-Route
+        if (response.headers['record-route']) {
+            response.recordRoute = response.headers['record-route'];
         }
 
         // Parse SDP body if present (for 200 OK responses)
@@ -613,7 +691,9 @@ class SipTrunkService extends EventEmitter {
                 startTime: Date.now(),
                 localSipPort: null,  // Will be set when socket binds
                 authSent: false,     // Track if we've already sent authenticated INVITE
-                answered: false      // Track if 200 OK already processed
+                answered: false,     // Track if 200 OK already processed
+                contactUri: null,    // Store Contact URI for future requests (ACK, BYE)
+                recordRoute: null    // Store Record-Route for future requests (ACK, BYE)
             };
 
             this.activeCalls.set(callId, callData);
@@ -774,7 +854,7 @@ class SipTrunkService extends EventEmitter {
 
                         // Resend ACK for duplicate 200 OK (important to avoid provider timeout)
                         const ack = this.createAckRequest(
-                            toNumber, callId, fromTag, callData.toTag || response.toTag, callData.cseq, localIp, callData.localSipPort
+                            toNumber, callId, fromTag, callData.toTag || response.toTag, callData.cseq, localIp, callData.localSipPort, callData.contactUri, callData.recordRoute
                         );
                         socket.send(ack, this.port, this.serverIp);
                         return;
@@ -789,18 +869,28 @@ class SipTrunkService extends EventEmitter {
                         callData.remoteRtpIp = response.sdp.remoteIp || this.serverIp;
                         callData.remoteRtpPort = response.sdp.remoteRtpPort || callData.rtpPort;
                         callData.remoteCodec = response.sdp.codec || 0; // Default to PCMU
+                        if (!callData.initialRtpIp) {
+                            callData.initialRtpIp = callData.remoteRtpIp;
+                        }
                         console.log(`[SipTrunk] Remote RTP endpoint: ${callData.remoteRtpIp}:${callData.remoteRtpPort}`);
                     } else {
                         // Fallback to server IP and local port if no SDP
                         callData.remoteRtpIp = this.serverIp;
                         callData.remoteRtpPort = callData.rtpPort;
                         callData.remoteCodec = 0;
+                        if (!callData.initialRtpIp) {
+                            callData.initialRtpIp = callData.remoteRtpIp;
+                        }
                         console.warn('[SipTrunk] No SDP in 200 OK, using fallback RTP endpoint');
                     }
 
+                    // Save URI and routes for future requests (ACK, BYE)
+                    if (response.contactUri) callData.contactUri = response.contactUri;
+                    if (response.recordRoute) callData.recordRoute = response.recordRoute;
+
                     // Send ACK
                     const ack = this.createAckRequest(
-                        toNumber, callId, fromTag, response.toTag, callData.cseq, localIp, callData.localSipPort
+                        toNumber, callId, fromTag, response.toTag, callData.cseq, localIp, callData.localSipPort, callData.contactUri, callData.recordRoute
                     );
                     socket.send(ack, this.port, this.serverIp);
 
@@ -871,12 +961,12 @@ class SipTrunkService extends EventEmitter {
 
         rtpSocket.on('message', (data, rinfo) => {
             // SYMMETRIC RTP: Update sending endpoint if we receive RTP from a different source
-            // This handles mid-call re-routing before 200 OK SDP update arrives
-            // BUT: Disable completely if SDP re-route has occurred (provider sends from old source for a while)
+            // BUT: Disable if we had a forced SDP re-route and the packet is from the old IP!
             if (rinfo.address !== callData.remoteRtpIp || rinfo.port !== callData.remoteRtpPort) {
-                // If SDP re-route happened, never use symmetric RTP (provider is unreliable)
-                if (callData.sdpRerouteOccurred) {
-                    // Ignore - SDP is authoritative after re-route
+                // If SDP re-route happened, check if the packet is from the exact old dead IP.
+                // If so, ignore it - it's delayed/duplicate packets from the initial provider node.
+                if (callData.sdpRerouteOccurred && rinfo.address === callData.initialRtpIp) {
+                    // Ignore stale packets from original proxy
                 } else if (callData.endpointLockoutUntil && Date.now() < callData.endpointLockoutUntil) {
                     // Within lockout period, ignore this packet's source
                 } else if (data.length > 12) {
@@ -892,7 +982,13 @@ class SipTrunkService extends EventEmitter {
             // RTP packet received from remote party
             // Skip RTP header (12 bytes) to get audio payload
             if (data.length > 12) {
-                const audioPayload = data.slice(12);
+                let audioPayload = data.slice(12);
+
+                // Decode A-law to U-law (Deepgram expects format=mulaw)
+                if (callData.remoteCodec === 8) {
+                    audioPayload = alawToUlaw(audioPayload);
+                }
+
                 this.emit('audio_in', {
                     callId: callData.callId,
                     internalCallId: callData.internalCallId,
@@ -1093,7 +1189,9 @@ class SipTrunkService extends EventEmitter {
             callData.toTag,
             ++callData.cseq,
             localIp,
-            callData.localSipPort
+            callData.localSipPort,
+            callData.contactUri,
+            callData.recordRoute
         );
 
         callData.socket.send(bye, this.port, this.serverIp, () => {
