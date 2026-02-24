@@ -67,6 +67,83 @@ function alawToUlaw(alawBuffer) {
     return ulawBuffer;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Proper G.711 encoder: 16-bit signed linear PCM → 8-bit compressed sample
+// Single quantization step (same path as hardware phones).
+// Eliminates double-quantization noise from ulaw→alaw table transcoding.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Encode one 16-bit signed PCM sample to G.711 A-law (PCMA)
+ * ITU-T G.711 A-law compression
+ */
+function pcmSampleToAlaw(sample) {
+    // Clamp to 16-bit range
+    if (sample > 32767) sample = 32767;
+    if (sample < -32768) sample = -32768;
+
+    const sign = (sample < 0) ? 0 : 0x80;  // sign bit (inverted in A-law)
+    if (sample < 0) sample = -sample - 1;
+
+    // Scale to 12-bit for A-law exponent calculation
+    sample >>= 4;
+
+    let exp, mantissa;
+    if (sample < 32) { exp = 0; mantissa = sample >> 1; }
+    else if (sample < 64) { exp = 1; mantissa = (sample - 32) >> 1; }
+    else if (sample < 128) { exp = 2; mantissa = (sample - 64) >> 2; }
+    else if (sample < 256) { exp = 3; mantissa = (sample - 128) >> 3; }
+    else if (sample < 512) { exp = 4; mantissa = (sample - 256) >> 4; }
+    else if (sample < 1024) { exp = 5; mantissa = (sample - 512) >> 5; }
+    else if (sample < 2048) { exp = 6; mantissa = (sample - 1024) >> 6; }
+    else { exp = 7; mantissa = (sample - 2048) >> 7; }
+
+    return ((sign | (exp << 4) | mantissa) ^ 0x55) & 0xFF;  // XOR 0x55 per G.711
+}
+
+/**
+ * Encode one 16-bit signed PCM sample to G.711 μ-law (PCMU)
+ * ITU-T G.711 μ-law compression (μ = 255)
+ */
+function pcmSampleToUlaw(sample) {
+    const BIAS = 0x84;
+    const CLIP = 32635;
+
+    const sign = (sample < 0) ? 0 : 0x80;
+    if (sample < 0) sample = -sample;
+    if (sample > CLIP) sample = CLIP;
+    sample += BIAS;
+
+    let exp = 7;
+    for (let mask = 0x4000; exp > 0 && (sample & mask) === 0; exp--, mask >>= 1) { }
+    const mantissa = (sample >> (exp + 3)) & 0x0F;
+    return (~(sign | (exp << 4) | mantissa)) & 0xFF;
+}
+
+/**
+ * Convert a buffer of 16kHz 16-bit signed little-endian PCM
+ * to 8kHz G.711 compressed audio (A-law or μ-law).
+ * Downsamples 2:1 by averaging pairs of samples (removes aliasing).
+ * @param {Buffer} pcmBuf   - raw PCM input (2 bytes per sample, 16kHz)
+ * @param {number} codec    - 8 for A-law (PCMA), 0 for μ-law (PCMU)
+ * @returns {Buffer}        - compressed audio bytes at 8kHz
+ */
+function convertPcm16kTo8k(pcmBuf, codec) {
+    // 2 input samples (4 bytes) → 1 output sample after 2:1 decimation
+    const numOutputSamples = Math.floor(pcmBuf.length / 4);
+    const output = Buffer.alloc(numOutputSamples);
+    const encode = (codec === 8) ? pcmSampleToAlaw : pcmSampleToUlaw;
+
+    for (let i = 0; i < numOutputSamples; i++) {
+        const s1 = pcmBuf.readInt16LE(i * 4);
+        const s2 = pcmBuf.readInt16LE(i * 4 + 2);
+        // Average adjacent samples = simple low-pass filter to prevent aliasing
+        const avg = (s1 + s2) >> 1;
+        output[i] = encode(avg);
+    }
+    return output;
+}
+
 class SipTrunkService extends EventEmitter {
     constructor(config) {
         super();
@@ -1082,19 +1159,14 @@ class SipTrunkService extends EventEmitter {
             return;
         }
 
-        // Split audio into 20ms chunks (160 bytes each for 8kHz μ-law)
-        const CHUNK_SIZE = 160;
-        let offset = 0;
-
-        // Convert μ-law to A-law if remote codec is 8 (PCMA)
-        // ElevenLabs outputs μ-law (codec 0), but remote may negotiate A-law (codec 8)
-        let processedAudio = audioData;
-        if (callData.remoteCodec === 8) {
-            processedAudio = ulawToAlaw(audioData);
-            if (!callData.codecConversionLogged) {
-                console.log('[SipTrunk] Converting audio from μ-law to A-law for remote codec 8');
-                callData.codecConversionLogged = true;
-            }
+        // Convert 16kHz 16-bit signed PCM to 8kHz G.711 compressed audio
+        // (A-law for codec 8, μ-law for codec 0) using single-step ITU-T G.711 encoding.
+        // This is the same path hardware phones use — eliminates double-quantization noise.
+        const processedAudio = convertPcm16kTo8k(audioData, callData.remoteCodec || 0);
+        if (!callData.codecConversionLogged) {
+            const codecName = callData.remoteCodec === 8 ? 'A-law (PCMA)' : 'μ-law (PCMU)';
+            console.log(`[SipTrunk] PCM→${codecName}: ${audioData.length} PCM bytes → ${processedAudio.length} G.711 bytes`);
+            callData.codecConversionLogged = true;
         }
 
         // Queue all chunks for paced sending

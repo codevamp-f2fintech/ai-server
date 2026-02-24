@@ -51,7 +51,7 @@ class ElevenLabsService {
             const requestBody = {
                 text,
                 model_id: modelId,
-                output_format: 'ulaw_8000' // μ-law 8kHz format - native for Twilio, no conversion needed
+                output_format: 'pcm_16000' // 16kHz 16-bit signed PCM - highest quality source for G.711 transcoding
             };
 
             // V3 models do NOT support voice_settings (stability, speed, similarity)

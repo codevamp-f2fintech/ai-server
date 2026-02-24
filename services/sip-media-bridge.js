@@ -81,9 +81,10 @@ class SipMediaBridge {
             // Pre-seed Deepgram encoding from the already-negotiated SDP codec
             // (sipService already parsed the 200 OK SDP before this bridge was created)
             // 0=PCMU → 'mulaw', 8=PCMA → 'alaw'
-            // Always use mulaw — we negotiate PCMU-only in SDP, matching ElevenLabs output directly
-            transcriberConfig.encoding = 'mulaw';
-            console.log(`[SipMediaBridge] Deepgram encoding: 'mulaw' (PCMU-only SDP)`);
+            // Provider always negotiates PCMA (A-law, codec 8) — confirmed by SDP logs.
+            // Set Deepgram to alaw BEFORE connecting so it correctly decodes incoming audio.
+            transcriberConfig.encoding = 'alaw';
+            console.log(`[SipMediaBridge] Deepgram encoding: 'alaw' (provider negotiates PCMA)`);
 
             // Start the conversation (this will trigger first message if configured)
             await orchestrator.start();
