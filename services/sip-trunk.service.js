@@ -332,17 +332,17 @@ class SipTrunkService extends EventEmitter {
         console.log(`  To: ${cleanTo}`);
         console.log(`  Server: ${this.serverIp}:${this.port}`);
 
-        // SDP for audio - offer ONLY PCMU (μ-law, codec 0)
-        // ElevenLabs outputs ulaw_8000 natively → zero conversion needed
-        // Deepgram accepts mulaw natively → zero conversion needed on inbound
+        // SDP for audio - offer PCMU first (preferred), then PCMA as fallback
+        // Provider may require A-law (PCMA) due to regional standards
         const sdp = [
             'v=0',
             `o=- ${Date.now()} ${Date.now()} IN IP4 ${localIp}`,
             's=VaniVoiceAI',
             `c=IN IP4 ${localIp}`,
             't=0 0',
-            `m=audio ${rtpPort} RTP/AVP 0`,
+            `m=audio ${rtpPort} RTP/AVP 0 8`,
             'a=rtpmap:0 PCMU/8000',
+            'a=rtpmap:8 PCMA/8000',
             'a=ptime:20',
             'a=sendrecv',
         ].join('\r\n');
@@ -482,15 +482,16 @@ class SipTrunkService extends EventEmitter {
             .update(`${ha1}:${authParams.nonce}:${ha2}`)
             .digest('hex');
 
-        // SDP for audio - PCMU only
+        // SDP for audio
         const sdp = [
             'v=0',
             `o=- ${Date.now()} ${Date.now()} IN IP4 ${localIp}`,
             's=VaniVoiceAI',
             `c=IN IP4 ${localIp}`,
             't=0 0',
-            `m=audio ${rtpPort} RTP/AVP 0`,
+            `m=audio ${rtpPort} RTP/AVP 0 8`,
             'a=rtpmap:0 PCMU/8000',
+            'a=rtpmap:8 PCMA/8000',
             'a=ptime:20',
             'a=sendrecv',
             ''
@@ -774,8 +775,9 @@ class SipTrunkService extends EventEmitter {
                             's=VaniVoiceAI',
                             `c=IN IP4 ${localIp}`,
                             't=0 0',
-                            `m=audio ${callData.rtpPort} RTP/AVP 0`,
+                            `m=audio ${callData.rtpPort} RTP/AVP 0 8`,
                             'a=rtpmap:0 PCMU/8000',
+                            'a=rtpmap:8 PCMA/8000',
                             'a=ptime:20',
                             'a=sendrecv',
                             ''
@@ -1021,10 +1023,12 @@ class SipTrunkService extends EventEmitter {
                 return;
             }
 
-            // Check if we've been silent for too long (more than 40ms since last audio)
-            const timeSinceLastAudio = Date.now() - callData.lastAudioSentTime;
-            if (timeSinceLastAudio < 40) {
-                return; // Recently sent audio, no need for keep-alive
+            // Suppress keep-alive for 200ms after last real RTP packet
+            // This prevents silence packets from interleaving between ElevenLabs streaming chunks
+            // (which arrive in rapid succession with brief gaps between them)
+            const timeSinceLastRtp = Date.now() - (callData.lastRtpSentTime || 0);
+            if (timeSinceLastRtp < 200) {
+                return;
             }
 
             // Select appropriate silence based on codec
@@ -1082,9 +1086,16 @@ class SipTrunkService extends EventEmitter {
         const CHUNK_SIZE = 160;
         let offset = 0;
 
-        // No codec conversion needed: we negotiate PCMU (μ-law) only in SDP,
-        // and ElevenLabs outputs ulaw_8000 natively — audio goes straight to RTP.
-        const processedAudio = audioData;
+        // Convert μ-law to A-law if remote codec is 8 (PCMA)
+        // ElevenLabs outputs μ-law (codec 0), but remote may negotiate A-law (codec 8)
+        let processedAudio = audioData;
+        if (callData.remoteCodec === 8) {
+            processedAudio = ulawToAlaw(audioData);
+            if (!callData.codecConversionLogged) {
+                console.log('[SipTrunk] Converting audio from μ-law to A-law for remote codec 8');
+                callData.codecConversionLogged = true;
+            }
+        }
 
         // Queue all chunks for paced sending
         if (!callData.audioQueue) {
@@ -1158,6 +1169,8 @@ class SipTrunkService extends EventEmitter {
 
                 try {
                     callData.rtpSocket.send(rtpPacket, targetPort, targetIp);
+                    // Track exact time of last real audio packet for keep-alive suppression
+                    callData.lastRtpSentTime = Date.now();
                 } catch (err) {
                     // Socket might be closed, clear queue and stop
                     callData.audioQueue = [];
