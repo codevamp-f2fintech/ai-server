@@ -6,143 +6,31 @@ const dgram = require('dgram');
 const crypto = require('crypto');
 const EventEmitter = require('events');
 
-// μ-law to A-law conversion table (ITU-T G.711)
-// This converts μ-law (PCMU, codec 0) to A-law (PCMA, codec 8)
-const ULAW_TO_ALAW = [
-    42, 43, 40, 41, 46, 47, 44, 45, 34, 35, 32, 33, 38, 39, 36, 37,
-    58, 59, 56, 57, 62, 63, 60, 61, 50, 51, 48, 49, 54, 55, 52, 53,
-    10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5,
-    26, 27, 24, 25, 30, 31, 28, 29, 18, 19, 16, 17, 22, 23, 20, 21,
-    98, 99, 96, 97, 102, 103, 100, 101, 90, 91, 88, 89, 94, 95, 92, 93,
-    114, 115, 112, 113, 118, 119, 116, 117, 106, 107, 104, 105, 110, 111, 108, 109,
-    66, 67, 64, 65, 70, 71, 68, 69, 74, 75, 72, 73, 78, 79, 76, 77,
-    82, 83, 80, 81, 86, 87, 84, 85, 122, 123, 120, 121, 126, 127, 124, 125,
-    170, 171, 168, 169, 174, 175, 172, 173, 162, 163, 160, 161, 166, 167, 164, 165,
-    186, 187, 184, 185, 190, 191, 188, 189, 178, 179, 176, 177, 182, 183, 180, 181,
-    138, 139, 136, 137, 142, 143, 140, 141, 130, 131, 128, 129, 134, 135, 132, 133,
-    154, 155, 152, 153, 158, 159, 156, 157, 146, 147, 144, 145, 150, 151, 148, 149,
-    226, 227, 224, 225, 230, 231, 228, 229, 218, 219, 216, 217, 222, 223, 220, 221,
-    242, 243, 240, 241, 246, 247, 244, 245, 234, 235, 232, 233, 238, 239, 236, 237,
-    194, 195, 192, 193, 198, 199, 196, 197, 202, 203, 200, 201, 206, 207, 204, 205,
-    210, 211, 208, 209, 214, 215, 212, 213, 250, 251, 248, 249, 254, 255, 252, 253
-];
+// Use the alawmulaw npm library for correct ITU-T G.711 codec conversion.
+// This library implements the proper companding algorithm — cleaner than hand-rolled tables.
+const alawmulaw = require('alawmulaw');
 
-// A-law to μ-law conversion table (ITU-T G.711)
-// This table re-codes A-law (PCMA, codec 8) bytes for Deepgram mu-law consumption.
-// Values preserve the signal amplitude so Deepgram can detect speech.
-const ALAW_TO_ULAW = [
-    42, 43, 40, 41, 46, 47, 44, 45, 34, 35, 32, 33, 38, 39, 36, 37,
-    58, 59, 56, 57, 62, 63, 60, 61, 50, 51, 48, 49, 54, 55, 52, 53,
-    10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5,
-    26, 27, 24, 25, 30, 31, 28, 29, 18, 19, 16, 17, 22, 23, 20, 21,
-    98, 99, 96, 97, 102, 103, 100, 101, 90, 91, 88, 89, 94, 95, 92, 93,
-    114, 115, 112, 113, 118, 119, 116, 117, 106, 107, 104, 105, 110, 111, 108, 109,
-    66, 67, 64, 65, 70, 71, 68, 69, 74, 75, 72, 73, 78, 79, 76, 77,
-    82, 83, 80, 81, 86, 87, 84, 85, 122, 123, 120, 121, 126, 127, 124, 125,
-    170, 171, 168, 169, 174, 175, 172, 173, 162, 163, 160, 161, 166, 167, 164, 165,
-    186, 187, 184, 185, 190, 191, 188, 189, 178, 179, 176, 177, 182, 183, 180, 181,
-    138, 139, 136, 137, 142, 143, 140, 141, 130, 131, 128, 129, 134, 135, 132, 133,
-    154, 155, 152, 153, 158, 159, 156, 157, 146, 147, 144, 145, 150, 151, 148, 149,
-    226, 227, 224, 225, 230, 231, 228, 229, 218, 219, 216, 217, 222, 223, 220, 221,
-    242, 243, 240, 241, 246, 247, 244, 245, 234, 235, 232, 233, 238, 239, 236, 237,
-    194, 195, 192, 193, 198, 199, 196, 197, 202, 203, 200, 201, 206, 207, 204, 205,
-    210, 211, 208, 209, 214, 215, 212, 213, 250, 251, 248, 249, 254, 255, 252, 253
-];
-
-// Convert μ-law buffer to A-law buffer
+/**
+ * Convert a μ-law buffer to A-law buffer using alawmulaw library
+ * alawmulaw.mulaw.decode → 16-bit samples → alawmulaw.alaw.encode → A-law bytes
+ */
 function ulawToAlaw(ulawBuffer) {
-    const alawBuffer = Buffer.alloc(ulawBuffer.length);
-    for (let i = 0; i < ulawBuffer.length; i++) {
-        alawBuffer[i] = ULAW_TO_ALAW[ulawBuffer[i]];
-    }
-    return alawBuffer;
+    // Decode μ-law → 16-bit linear PCM
+    const pcmSamples = alawmulaw.mulaw.decode(ulawBuffer);
+    // Encode 16-bit linear PCM → A-law
+    return Buffer.from(alawmulaw.alaw.encode(pcmSamples));
 }
 
-// Convert A-law buffer to μ-law buffer
+/**
+ * Convert an A-law buffer to μ-law buffer using alawmulaw library
+ */
 function alawToUlaw(alawBuffer) {
-    const ulawBuffer = Buffer.alloc(alawBuffer.length);
-    for (let i = 0; i < alawBuffer.length; i++) {
-        ulawBuffer[i] = ALAW_TO_ULAW[alawBuffer[i]];
-    }
-    return ulawBuffer;
+    // Decode A-law → 16-bit linear PCM
+    const pcmSamples = alawmulaw.alaw.decode(alawBuffer);
+    // Encode 16-bit linear PCM → μ-law
+    return Buffer.from(alawmulaw.mulaw.encode(pcmSamples));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Proper G.711 encoder: 16-bit signed linear PCM → 8-bit compressed sample
-// Single quantization step (same path as hardware phones).
-// Eliminates double-quantization noise from ulaw→alaw table transcoding.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Encode one 16-bit signed PCM sample to G.711 A-law (PCMA)
- * ITU-T G.711 A-law compression
- */
-function pcmSampleToAlaw(sample) {
-    // Clamp to 16-bit range
-    if (sample > 32767) sample = 32767;
-    if (sample < -32768) sample = -32768;
-
-    const sign = (sample < 0) ? 0 : 0x80;  // sign bit (inverted in A-law)
-    if (sample < 0) sample = -sample - 1;
-
-    // Scale to 12-bit for A-law exponent calculation
-    sample >>= 4;
-
-    let exp, mantissa;
-    if (sample < 32) { exp = 0; mantissa = sample >> 1; }
-    else if (sample < 64) { exp = 1; mantissa = (sample - 32) >> 1; }
-    else if (sample < 128) { exp = 2; mantissa = (sample - 64) >> 2; }
-    else if (sample < 256) { exp = 3; mantissa = (sample - 128) >> 3; }
-    else if (sample < 512) { exp = 4; mantissa = (sample - 256) >> 4; }
-    else if (sample < 1024) { exp = 5; mantissa = (sample - 512) >> 5; }
-    else if (sample < 2048) { exp = 6; mantissa = (sample - 1024) >> 6; }
-    else { exp = 7; mantissa = (sample - 2048) >> 7; }
-
-    return ((sign | (exp << 4) | mantissa) ^ 0x55) & 0xFF;  // XOR 0x55 per G.711
-}
-
-/**
- * Encode one 16-bit signed PCM sample to G.711 μ-law (PCMU)
- * ITU-T G.711 μ-law compression (μ = 255)
- */
-function pcmSampleToUlaw(sample) {
-    const BIAS = 0x84;
-    const CLIP = 32635;
-
-    const sign = (sample < 0) ? 0 : 0x80;
-    if (sample < 0) sample = -sample;
-    if (sample > CLIP) sample = CLIP;
-    sample += BIAS;
-
-    let exp = 7;
-    for (let mask = 0x4000; exp > 0 && (sample & mask) === 0; exp--, mask >>= 1) { }
-    const mantissa = (sample >> (exp + 3)) & 0x0F;
-    return (~(sign | (exp << 4) | mantissa)) & 0xFF;
-}
-
-/**
- * Convert a buffer of 16kHz 16-bit signed little-endian PCM
- * to 8kHz G.711 compressed audio (A-law or μ-law).
- * Downsamples 2:1 by averaging pairs of samples (removes aliasing).
- * @param {Buffer} pcmBuf   - raw PCM input (2 bytes per sample, 16kHz)
- * @param {number} codec    - 8 for A-law (PCMA), 0 for μ-law (PCMU)
- * @returns {Buffer}        - compressed audio bytes at 8kHz
- */
-function convertPcm16kTo8k(pcmBuf, codec) {
-    // 2 input samples (4 bytes) → 1 output sample after 2:1 decimation
-    const numOutputSamples = Math.floor(pcmBuf.length / 4);
-    const output = Buffer.alloc(numOutputSamples);
-    const encode = (codec === 8) ? pcmSampleToAlaw : pcmSampleToUlaw;
-
-    for (let i = 0; i < numOutputSamples; i++) {
-        const s1 = pcmBuf.readInt16LE(i * 4);
-        const s2 = pcmBuf.readInt16LE(i * 4 + 2);
-        // Average adjacent samples = simple low-pass filter to prevent aliasing
-        const avg = (s1 + s2) >> 1;
-        output[i] = encode(avg);
-    }
-    return output;
-}
 
 class SipTrunkService extends EventEmitter {
     constructor(config) {
@@ -1159,17 +1047,18 @@ class SipTrunkService extends EventEmitter {
             return;
         }
 
-        // Convert 16kHz 16-bit signed PCM to 8kHz G.711 compressed audio
-        // (A-law for codec 8, μ-law for codec 0) using single-step ITU-T G.711 encoding.
-        // This is the same path hardware phones use — eliminates double-quantization noise.
-        const processedAudio = convertPcm16kTo8k(audioData, callData.remoteCodec || 0);
-        if (!callData.codecConversionLogged) {
-            const codecName = callData.remoteCodec === 8 ? 'A-law (PCMA)' : 'μ-law (PCMU)';
-            console.log(`[SipTrunk] PCM→${codecName}: ${audioData.length} PCM bytes → ${processedAudio.length} G.711 bytes`);
-            callData.codecConversionLogged = true;
+        // Convert μ-law to A-law if remote codec is 8 (PCMA)
+        // ElevenLabs outputs μ-law (ulaw_8000), but remote negotiates A-law (codec 8)
+        let processedAudio = audioData;
+        if (callData.remoteCodec === 8) {
+            processedAudio = ulawToAlaw(audioData);
+            if (!callData.codecConversionLogged) {
+                console.log('[SipTrunk] Converting audio μ-law → A-law for remote codec 8 (PCMA)');
+                callData.codecConversionLogged = true;
+            }
         }
 
-        // 160 bytes = one 20ms frame at 8kHz (one byte per sample, G.711)
+        // 160 bytes = one 20ms frame at 8kHz G.711
         const CHUNK_SIZE = 160;
 
         // Queue all chunks for paced sending
