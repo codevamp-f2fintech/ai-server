@@ -332,16 +332,17 @@ class SipTrunkService extends EventEmitter {
         console.log(`  To: ${cleanTo}`);
         console.log(`  Server: ${this.serverIp}:${this.port}`);
 
-        // SDP for audio - μ-law (PCMU) codec
+        // SDP for audio - offer ONLY PCMU (μ-law, codec 0)
+        // ElevenLabs outputs ulaw_8000 natively → zero conversion needed
+        // Deepgram accepts mulaw natively → zero conversion needed on inbound
         const sdp = [
             'v=0',
             `o=- ${Date.now()} ${Date.now()} IN IP4 ${localIp}`,
             's=VaniVoiceAI',
             `c=IN IP4 ${localIp}`,
             't=0 0',
-            `m=audio ${rtpPort} RTP/AVP 0 8`,  // 0=PCMU (μ-law), 8=PCMA (A-law)
+            `m=audio ${rtpPort} RTP/AVP 0`,
             'a=rtpmap:0 PCMU/8000',
-            'a=rtpmap:8 PCMA/8000',
             'a=ptime:20',
             'a=sendrecv',
         ].join('\r\n');
@@ -481,16 +482,15 @@ class SipTrunkService extends EventEmitter {
             .update(`${ha1}:${authParams.nonce}:${ha2}`)
             .digest('hex');
 
-        // SDP for audio
+        // SDP for audio - PCMU only
         const sdp = [
             'v=0',
             `o=- ${Date.now()} ${Date.now()} IN IP4 ${localIp}`,
             's=VaniVoiceAI',
             `c=IN IP4 ${localIp}`,
             't=0 0',
-            `m=audio ${rtpPort} RTP/AVP 0 8`,
+            `m=audio ${rtpPort} RTP/AVP 0`,
             'a=rtpmap:0 PCMU/8000',
-            'a=rtpmap:8 PCMA/8000',
             'a=ptime:20',
             'a=sendrecv',
             ''
@@ -767,16 +767,15 @@ class SipTrunkService extends EventEmitter {
                             }
                         }
 
-                        // Build 200 OK response with our SDP
+                        // Build 200 OK response with our SDP (PCMU only)
                         const reInviteSdp = [
                             'v=0',
                             `o=- ${Date.now()} ${Date.now()} IN IP4 ${localIp}`,
                             's=VaniVoiceAI',
                             `c=IN IP4 ${localIp}`,
                             't=0 0',
-                            `m=audio ${callData.rtpPort} RTP/AVP 0 8`,
+                            `m=audio ${callData.rtpPort} RTP/AVP 0`,
                             'a=rtpmap:0 PCMU/8000',
-                            'a=rtpmap:8 PCMA/8000',
                             'a=ptime:20',
                             'a=sendrecv',
                             ''
@@ -1083,16 +1082,9 @@ class SipTrunkService extends EventEmitter {
         const CHUNK_SIZE = 160;
         let offset = 0;
 
-        // Convert μ-law to A-law if remote codec is 8 (PCMA)
-        // ElevenLabs outputs μ-law (codec 0), but remote may negotiate A-law (codec 8)
-        let processedAudio = audioData;
-        if (callData.remoteCodec === 8) {
-            processedAudio = ulawToAlaw(audioData);
-            if (!callData.codecConversionLogged) {
-                console.log('[SipTrunk] Converting audio from μ-law to A-law for remote codec 8');
-                callData.codecConversionLogged = true;
-            }
-        }
+        // No codec conversion needed: we negotiate PCMU (μ-law) only in SDP,
+        // and ElevenLabs outputs ulaw_8000 natively — audio goes straight to RTP.
+        const processedAudio = audioData;
 
         // Queue all chunks for paced sending
         if (!callData.audioQueue) {
@@ -1193,10 +1185,9 @@ class SipTrunkService extends EventEmitter {
         const CHUNK_SIZE = 160;
 
         // IMPORTANT: audioCarryBuffer already holds post-conversion bytes
-        // (ulawToAlaw was already done in sendAudio before storing carry bytes).
-        // So we MUST NOT convert again here — just pad with the correct silence bytes
-        // for the negotiated codec (A-law silence = 0xD5, μ-law silence = 0xFF).
-        const silenceByte = callData.remoteCodec === 8 ? 0xD5 : 0xFF;
+        // (which is just raw μ-law since we no longer do any conversion).
+        // Pad with μ-law silence (0xFF) to exactly 160 bytes.
+        const silenceByte = 0xFF;  // μ-law silence (we always negotiate PCMU now)
         const frameChunk = Buffer.alloc(CHUNK_SIZE, silenceByte);
         callData.audioCarryBuffer.copy(frameChunk, 0);  // carry bytes at start, silence padding at end
         callData.audioCarryBuffer = Buffer.alloc(0);
@@ -1219,7 +1210,7 @@ class SipTrunkService extends EventEmitter {
                 const chunk = callData.audioQueue.shift();
                 const header = Buffer.alloc(12);
                 header.writeUInt8(0x80, 0);
-                header.writeUInt8(callData.remoteCodec || 0x00, 1);
+                header.writeUInt8(0x00, 1);  // PCMU (μ-law), codec 0
                 header.writeUInt16BE(callData.rtpSequence++ & 0xFFFF, 2);
                 header.writeUInt32BE(callData.rtpTimestamp, 4);
                 header.writeUInt32BE(callData.ssrc, 8);
