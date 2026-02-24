@@ -1191,16 +1191,19 @@ class SipTrunkService extends EventEmitter {
         if (callData.callEnded) return;
 
         const CHUNK_SIZE = 160;
+
+        // IMPORTANT: audioCarryBuffer already holds post-conversion bytes
+        // (ulawToAlaw was already done in sendAudio before storing carry bytes).
+        // So we MUST NOT convert again here — just pad with the correct silence bytes
+        // for the negotiated codec (A-law silence = 0xD5, μ-law silence = 0xFF).
         const silenceByte = callData.remoteCodec === 8 ? 0xD5 : 0xFF;
         const frameChunk = Buffer.alloc(CHUNK_SIZE, silenceByte);
-        callData.audioCarryBuffer.copy(frameChunk, 0);
+        callData.audioCarryBuffer.copy(frameChunk, 0);  // carry bytes at start, silence padding at end
         callData.audioCarryBuffer = Buffer.alloc(0);
 
-        // Convert if needed
-        const payload = callData.remoteCodec === 8 ? ulawToAlaw(frameChunk) : frameChunk;
-
+        // Push the padded frame directly — already in the correct codec format
         if (!callData.audioQueue) callData.audioQueue = [];
-        callData.audioQueue.push(payload);
+        callData.audioQueue.push(frameChunk);
 
         // Start pacing timer if not already running
         if (!callData.audioSendInterval) {
