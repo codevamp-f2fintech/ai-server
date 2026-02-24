@@ -1169,6 +1169,9 @@ class SipTrunkService extends EventEmitter {
             callData.codecConversionLogged = true;
         }
 
+        // 160 bytes = one 20ms frame at 8kHz (one byte per sample, G.711)
+        const CHUNK_SIZE = 160;
+
         // Queue all chunks for paced sending
         if (!callData.audioQueue) {
             callData.audioQueue = [];
