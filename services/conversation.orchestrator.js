@@ -74,8 +74,11 @@ class ConversationOrchestrator extends EventEmitter {
     async start() {
         console.log('[Orchestrator] Starting conversation');
 
-        // Initialize Gemini with agent configuration
-        this.gemini.initializeConversation(this.agentConfig.model);
+        // Initialize Gemini with agent configuration + knowledge base
+        this.gemini.initializeConversation({
+            ...(this.agentConfig.model || {}),
+            knowledgeBase: this.agentConfig.knowledgeBase || []
+        });
 
         // Set up max duration timer
         if (this.agentConfig.maxDurationSeconds) {

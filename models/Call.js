@@ -20,8 +20,9 @@ const callSchema = new mongoose.Schema({
     customer: {
         number: String
     },
-    status: String, // 'initiated', 'ringing', 'in-progress', 'completed', 'failed'
+    status: String, // 'initiated', 'ringing', 'in-progress', 'completed', 'ended', 'failed'
     endedReason: String,
+    durationSeconds: { type: Number, default: 0 },
     messages: [mongoose.Schema.Types.Mixed],
     phoneCallProvider: String, // 'twilio'
     phoneCallProviderId: String,

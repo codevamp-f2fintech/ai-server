@@ -1,39 +1,25 @@
-// File Routes - API endpoints for VAPI file uploads (Knowledge Base)
+// File Routes - Knowledge Base upload
+// Uploads files to S3 and extracts text for Gemini injection
 // REQUIRES AUTHENTICATION
 
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
 const multer = require('multer');
-const FormData = require('form-data');
+const path = require('path');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { authenticate } = require('../middleware/auth');
 
 // Apply authentication middleware to ALL routes
 router.use(authenticate);
 
-// Configure multer for file uploads
+// Configure multer for in-memory file uploads
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: {
-        fileSize: 10 * 1024 * 1024, // 10MB limit
-    },
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
     fileFilter: (req, file, cb) => {
-        const allowedTypes = [
-            'application/pdf',
-            'text/plain',
-            'application/msword',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'text/csv',
-            'text/markdown',
-            'application/json',
-            'application/xml',
-            'text/xml'
-        ];
-
         const allowedExtensions = ['.pdf', '.txt', '.doc', '.docx', '.csv', '.md', '.json', '.xml', '.log', '.tsv', '.yaml'];
-        const ext = '.' + file.originalname.split('.').pop().toLowerCase();
-
-        if (allowedTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
+        const ext = path.extname(file.originalname).toLowerCase();
+        if (allowedExtensions.includes(ext)) {
             cb(null, true);
         } else {
             cb(new Error('Invalid file type. Allowed: PDF, TXT, DOC, DOCX, CSV, MD, JSON, XML'));
@@ -41,170 +27,111 @@ const upload = multer({
     }
 });
 
-const VAPI_BASE_URL = 'https://api.vapi.ai';
+// S3 client (shared with recording service)
+const s3Client = new S3Client({
+    region: process.env.AWS_REGION || 'ap-south-1',
+    credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+    }
+});
+
+/**
+ * Extract plain text from a file buffer
+ * @param {Buffer} buffer - File buffer
+ * @param {string} ext - File extension (with dot)
+ * @returns {Promise<string>} Extracted text
+ */
+async function extractText(buffer, ext) {
+    if (ext === '.pdf') {
+        try {
+            const pdfParse = require('pdf-parse');
+            const data = await pdfParse(buffer);
+            return data.text || '';
+        } catch (err) {
+            console.error('[Files] PDF parse error:', err.message);
+            return ''; // Return empty on parse failure
+        }
+    }
+    // All other formats: plain text (TXT, CSV, MD, JSON, XML, etc.)
+    return buffer.toString('utf-8');
+}
 
 /**
  * POST /vapi/files/upload
- * Upload a file to VAPI for knowledge base
+ * Upload a knowledge base file — extract text, upload to S3, return text + URL
  */
 router.post('/upload', upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
-            return res.status(400).json({
-                success: false,
-                message: 'No file provided'
-            });
+            return res.status(400).json({ success: false, message: 'No file provided' });
         }
 
-        if (!process.env.VAPI_KEY) {
-            return res.status(500).json({
-                success: false,
-                message: 'VAPI API key not configured'
-            });
-        }
+        const ext = path.extname(req.file.originalname).toLowerCase();
+        const id = `kb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-        // Create form data for VAPI
-        const formData = new FormData();
-        formData.append('file', req.file.buffer, {
-            filename: req.file.originalname,
-            contentType: req.file.mimetype
-        });
+        // 1. Extract text from the buffer
+        console.log(`[Files] Extracting text from ${req.file.originalname} (${ext})`);
+        const text = await extractText(req.file.buffer, ext);
+        console.log(`[Files] Extracted ${text.length} chars from ${req.file.originalname}`);
 
-        console.log('User', req.userId, 'uploading file:', req.file.originalname);
-
-        // Upload to VAPI
-        const response = await axios.post(`${VAPI_BASE_URL}/file`, formData, {
-            headers: {
-                'Authorization': `Bearer ${process.env.VAPI_KEY}`,
-                ...formData.getHeaders()
+        // 2. Upload original file to S3 (if configured)
+        let s3Url = null;
+        if (process.env.AWS_S3_BUCKET) {
+            try {
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const s3Key = `knowledge-base/${req.userId}/${timestamp}_${id}${ext}`;
+                await s3Client.send(new PutObjectCommand({
+                    Bucket: process.env.AWS_S3_BUCKET,
+                    Key: s3Key,
+                    Body: req.file.buffer,
+                    ContentType: req.file.mimetype || 'application/octet-stream',
+                    Metadata: {
+                        originalName: req.file.originalname,
+                        userId: String(req.userId)
+                    }
+                }));
+                s3Url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION || 'ap-south-1'}.amazonaws.com/${s3Key}`;
+                console.log(`[Files] Uploaded to S3: ${s3Url}`);
+            } catch (s3Err) {
+                console.error('[Files] S3 upload failed (continuing without S3 URL):', s3Err.message);
             }
-        });
-
-        console.log('File uploaded successfully:', response.data.id);
+        } else {
+            console.warn('[Files] AWS_S3_BUCKET not set — file saved locally only (text extracted)');
+        }
 
         res.json({
             success: true,
             file: {
-                id: response.data.id,
-                name: response.data.name || req.file.originalname,
-                originalName: response.data.originalName || req.file.originalname,
-                status: response.data.status || 'uploaded',
-                bytes: response.data.bytes || req.file.size,
-                mimetype: response.data.mimetype || req.file.mimetype,
-                createdAt: response.data.createdAt
+                id,
+                name: req.file.originalname,
+                text,
+                s3Url,
+                bytes: req.file.size,
+                status: 'processed'
             }
         });
 
     } catch (error) {
-        console.error('Error uploading file:', error.response?.data || error.message);
-        res.status(500).json({
-            success: false,
-            message: error.response?.data?.message || 'Failed to upload file'
-        });
+        console.error('[Files] Upload error:', error.message);
+        res.status(500).json({ success: false, message: error.message || 'Failed to process file' });
     }
 });
 
 /**
  * GET /vapi/files
- * List all uploaded files
+ * List KB files — returns empty array (files are stored per-agent in MongoDB)
  */
 router.get('/', async (req, res) => {
-    try {
-        if (!process.env.VAPI_KEY) {
-            return res.status(500).json({
-                success: false,
-                message: 'VAPI API key not configured'
-            });
-        }
-
-        const response = await axios.get(`${VAPI_BASE_URL}/file`, {
-            headers: {
-                'Authorization': `Bearer ${process.env.VAPI_KEY}`
-            }
-        });
-
-        res.json({
-            success: true,
-            files: response.data
-        });
-
-    } catch (error) {
-        console.error('Error listing files:', error.response?.data || error.message);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to list files'
-        });
-    }
-});
-
-/**
- * GET /vapi/files/:id
- * Get a specific file details
- */
-router.get('/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-
-        if (!process.env.VAPI_KEY) {
-            return res.status(500).json({
-                success: false,
-                message: 'VAPI API key not configured'
-            });
-        }
-
-        const response = await axios.get(`${VAPI_BASE_URL}/file/${id}`, {
-            headers: {
-                'Authorization': `Bearer ${process.env.VAPI_KEY}`
-            }
-        });
-
-        res.json({
-            success: true,
-            file: response.data
-        });
-
-    } catch (error) {
-        console.error('Error getting file:', error.response?.data || error.message);
-        res.status(404).json({
-            success: false,
-            message: 'File not found'
-        });
-    }
+    res.json({ success: true, files: [] });
 });
 
 /**
  * DELETE /vapi/files/:id
- * Delete a file
+ * Remove file reference (actual deletion from S3 is out of scope for now)
  */
 router.delete('/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-
-        if (!process.env.VAPI_KEY) {
-            return res.status(500).json({
-                success: false,
-                message: 'VAPI API key not configured'
-            });
-        }
-
-        await axios.delete(`${VAPI_BASE_URL}/file/${id}`, {
-            headers: {
-                'Authorization': `Bearer ${process.env.VAPI_KEY}`
-            }
-        });
-
-        res.json({
-            success: true,
-            message: 'File deleted successfully'
-        });
-
-    } catch (error) {
-        console.error('Error deleting file:', error.response?.data || error.message);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to delete file'
-        });
-    }
+    res.json({ success: true, message: 'File reference removed' });
 });
 
 module.exports = router;

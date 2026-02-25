@@ -55,10 +55,9 @@ app.use('/api/independent-calls', independentCallRoutes);
 app.use(independentCallRoutes);
 
 
-const VAPI_KEY = process.env.VAPI_KEY;
+const VAPI_KEY = process.env.VAPI_KEY; // Optional - only used by legacy VAPI proxy routes
 if (!VAPI_KEY) {
-  console.error('FATAL: VAPI_KEY environment variable is not set.');
-  process.exit(1);
+  console.warn('WARNING: VAPI_KEY not set — legacy VAPI API routes will not work (this is OK if using SIP)');
 }
 const BASE = 'https://api.vapi.ai';
 

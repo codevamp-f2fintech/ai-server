@@ -23,7 +23,20 @@ class GeminiService {
         // Get system prompt from messages array (if exists)
         const messages = config.messages || [];
         const systemMessage = messages.find(m => m.role === 'system');
-        const systemPrompt = systemMessage?.content || config.systemPrompt || 'You are a helpful assistant.';
+        let systemPrompt = systemMessage?.content || config.systemPrompt || 'You are a helpful assistant.';
+
+        // Inject knowledge base into system prompt
+        const knowledgeBase = config.knowledgeBase || [];
+        if (knowledgeBase.length > 0) {
+            const kbText = knowledgeBase
+                .filter(f => f.text && f.text.trim().length > 0)
+                .map(f => `--- ${f.name} ---\n${f.text.trim()}`)
+                .join('\n\n');
+            if (kbText) {
+                systemPrompt += `\n\n[KNOWLEDGE BASE - Use this information to answer questions accurately]\n${kbText}`;
+                console.log(`[Gemini] Injected ${knowledgeBase.length} KB file(s) into system prompt (${kbText.length} chars)`);
+            }
+        }
 
         // Map model name (OpenAI style to Gemini style)
         // Using gemini-2.5-flash as default (confirmed working)

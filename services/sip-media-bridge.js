@@ -39,6 +39,7 @@ class SipMediaBridge {
                     model: cfg.model || {},
                     voice: cfg.voice || {},
                     transcriber: transcriberConfig,
+                    knowledgeBase: cfg.knowledgeBase || [],   // ← KB text for Gemini injection
                     firstMessage: cfg.firstMessage || 'Hello! How can I help you today?',
                     firstMessageMode: cfg.firstMessageMode || 'assistant-speaks-first',
                     maxDurationSeconds: cfg.maxDurationSeconds || 600,
@@ -271,7 +272,7 @@ class SipMediaBridge {
                 await Call.findByIdAndUpdate(
                     internalCallId,
                     {
-                        status: 'completed',
+                        status: 'ended',
                         endedAt: new Date(),
                         endedReason: reason,
                         durationSeconds: Math.round(duration),
