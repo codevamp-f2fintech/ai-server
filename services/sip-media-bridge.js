@@ -78,13 +78,11 @@ class SipMediaBridge {
             // Set up orchestrator event handlers
             this.setupOrchestratorEvents(session);
 
-            // Pre-seed Deepgram encoding from the already-negotiated SDP codec
-            // (sipService already parsed the 200 OK SDP before this bridge was created)
-            // 0=PCMU → 'mulaw', 8=PCMA → 'alaw'
-            // Provider always negotiates PCMA (A-law, codec 8) — confirmed by SDP logs.
-            // Set Deepgram to alaw BEFORE connecting so it correctly decodes incoming audio.
-            transcriberConfig.encoding = 'alaw';
-            console.log(`[SipMediaBridge] Deepgram encoding: 'alaw' (provider negotiates PCMA)`);
+            // Deepgram nova-2 with Hindi (language=hi) only accepts encoding=mulaw.
+            // Inbound SIP audio is A-law (codec 8) from the provider.
+            // We convert A-law → μ-law in the audioInHandler below before sending to Deepgram.
+            transcriberConfig.encoding = 'mulaw';
+            console.log(`[SipMediaBridge] Deepgram encoding: 'mulaw' (inbound A-law will be converted before STT)`);
 
             // Start the conversation (this will trigger first message if configured)
             await orchestrator.start();
@@ -101,7 +99,10 @@ class SipMediaBridge {
      * Set up incoming audio from SIP to Orchestrator
      */
     setupIncomingAudio(session) {
-        const { sipService, orchestrator, internalCallId, sipCallId, transcriberConfig } = session;
+        const { sipService, orchestrator, internalCallId, sipCallId } = session;
+
+        // alawmulaw for clean A-law → μ-law conversion (Deepgram requires mulaw for Hindi)
+        const alawmulaw = require('alawmulaw');
 
         // Listen for audio_in events from SipTrunkService
         const audioInHandler = ({ callId, audio, codec }) => {
@@ -109,17 +110,6 @@ class SipMediaBridge {
             if (callId !== sipCallId) return;
 
             session.audioPacketCount++;
-
-            // On FIRST packet: patch Deepgram encoding to match negotiated codec
-            // Deepgram natively supports both 'mulaw' (PT=0) and 'alaw' (PT=8)
-            // so we feed raw audio without any codec conversion
-            if (session.audioPacketCount === 1) {
-                const encoding = (codec === 8) ? 'alaw' : 'mulaw';
-                if (transcriberConfig.encoding !== encoding) {
-                    transcriberConfig.encoding = encoding;
-                    console.log(`[SipMediaBridge] Transcriber encoding set to '${encoding}' (remote codec ${codec})`);
-                }
-            }
 
             // Debug log every 100 packets (2 seconds of audio)
             if (session.audioPacketCount === 1 || session.audioPacketCount % 100 === 0) {
@@ -129,8 +119,17 @@ class SipMediaBridge {
             // Add to recording (caller audio)
             this.recordingService.addAudioChunk(internalCallId, audio, 'caller');
 
+            // Convert A-law → μ-law before sending to Deepgram.
+            // Deepgram nova-2 (Hindi) only accepts mulaw encoding.
+            // alawmulaw does a clean decode → Int16 PCM → encode path (no broken lookup tables).
+            let audioForStt = audio;
+            if (codec === 8) {
+                const pcm = alawmulaw.alaw.decode(audio);
+                audioForStt = Buffer.from(alawmulaw.mulaw.encode(pcm));
+            }
+
             // Send to orchestrator for speech-to-text
-            orchestrator.processIncomingAudio(audio);
+            orchestrator.processIncomingAudio(audioForStt);
         };
 
         sipService.on('audio_in', audioInHandler);
