@@ -30,19 +30,20 @@ class SipMediaBridge {
 
         try {
             // Create ConversationOrchestrator with agent config
-            // Note: transcriber.encoding will be patched after first RTP packet reveals the codec
-            const transcriberConfig = { ...(agent.transcriber || {}) };
+            // Agent settings are stored under agent.configuration (MongoDB schema)
+            const cfg = agent.configuration || {};
+            const transcriberConfig = { ...(cfg.transcriber || {}) };
 
             const orchestrator = new ConversationOrchestrator(
                 {
-                    model: agent.model || {},
-                    voice: agent.voice || {},
+                    model: cfg.model || {},
+                    voice: cfg.voice || {},
                     transcriber: transcriberConfig,
-                    firstMessage: agent.firstMessage || 'Hello! How can I help you today?',
-                    firstMessageMode: agent.firstMessageMode || 'assistant-speaks-first',
-                    maxDurationSeconds: agent.maxDurationSeconds || 600,
-                    silenceTimeoutSeconds: agent.silenceTimeoutSeconds || 30,
-                    responseDelaySeconds: agent.responseDelaySeconds || 0.4
+                    firstMessage: cfg.firstMessage || 'Hello! How can I help you today?',
+                    firstMessageMode: cfg.firstMessageMode || 'assistant-speaks-first',
+                    maxDurationSeconds: cfg.maxDurationSeconds || 600,
+                    silenceTimeoutSeconds: cfg.silenceTimeoutSeconds || 30,
+                    responseDelaySeconds: cfg.responseDelaySeconds || 0.4
                 },
                 apiKeys
             );
