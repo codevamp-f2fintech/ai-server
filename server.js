@@ -145,12 +145,12 @@ app.get('/outbound-call-info/:id', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Call not found' });
     }
 
-    // Check if this is an independent call (Twilio SID format starts with CA/CS)
-    // or a VAPI call (UUID format)
+    // Check call type: Twilio SID (CA/CS prefix), MongoDB ObjectId (SIP), or UUID (VAPI)
     const isTwilioCall = /^(CA|CS)[a-f0-9]{32}$/i.test(id);
+    const isSipCall = /^[0-9a-fA-F]{24}$/.test(id); // MongoDB ObjectId = SIP call ID
 
-    if (isTwilioCall) {
-      // Independent call - return from MongoDB only (no VAPI API call)
+    if (isTwilioCall || isSipCall) {
+      // Independent call (Twilio or SIP) - return from MongoDB only, no VAPI lookup
       if (!existingCall) {
         return res.status(404).json({ error: 'Call not found' });
       }
