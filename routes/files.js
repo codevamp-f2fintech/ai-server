@@ -45,7 +45,9 @@ const s3Client = new S3Client({
 async function extractText(buffer, ext) {
     if (ext === '.pdf') {
         try {
-            const pdfParse = require('pdf-parse');
+            // Use raw lib path to avoid the bundled dist's browser-only polyfills
+            // (DOMMatrix, ImageData etc.) that crash in Node.js environments
+            const pdfParse = require('pdf-parse/lib/pdf-parse.js');
             const data = await pdfParse(buffer);
             const text = data.text || '';
             if (!text.trim()) {

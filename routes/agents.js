@@ -25,7 +25,8 @@ async function refetchKbText(s3Url, fileName) {
                     try {
                         const ext = (fileName || '').split('.').pop()?.toLowerCase();
                         if (ext === 'pdf') {
-                            const pdfParse = require('pdf-parse');
+                            // Use raw lib path to avoid browser-only polyfills (DOMMatrix etc.)
+                            const pdfParse = require('pdf-parse/lib/pdf-parse.js');
                             const data = await pdfParse(buffer);
                             const text = data.text || '';
                             console.log(`[Agents] Re-extracted ${text.length} chars from S3 KB: ${fileName}`);
