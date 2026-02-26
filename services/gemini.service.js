@@ -2,6 +2,26 @@
 // Handles conversation with Google Gemini AI
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const https = require('https');
+const http = require('http');
+
+/**
+ * Fetch a file from a URL and return it as a Buffer
+ */
+function fetchBuffer(url) {
+    return new Promise((resolve, reject) => {
+        const client = url.startsWith('https') ? https : http;
+        client.get(url, (res) => {
+            if (res.statusCode !== 200) {
+                return reject(new Error(`HTTP ${res.statusCode} fetching ${url}`));
+            }
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+            res.on('error', reject);
+        }).on('error', reject);
+    });
+}
 
 class GeminiService {
     constructor(apiKey) {
@@ -15,8 +35,9 @@ class GeminiService {
     /**
      * Initialize conversation with agent configuration
      * @param {Object} config - Model configuration from agent
+     * @returns {Promise<void>}
      */
-    initializeConversation(config) {
+    async initializeConversation(config) {
         // Ensure config exists
         config = config || {};
 
@@ -27,14 +48,52 @@ class GeminiService {
 
         // Inject knowledge base into system prompt
         const knowledgeBase = config.knowledgeBase || [];
+        console.log(`[Gemini] KB entries: ${knowledgeBase.length}`);
+
         if (knowledgeBase.length > 0) {
-            const kbText = knowledgeBase
+            // For each KB file: use stored text, or fetch from S3 if empty
+            const resolvedKB = await Promise.all(knowledgeBase.map(async (f) => {
+                if (f.text && f.text.trim().length > 0) {
+                    console.log(`[Gemini] KB '${f.name}': using stored text (${f.text.length} chars)`);
+                    return { ...f };
+                }
+
+                // text is empty — attempt S3 fetch
+                if (f.s3Url) {
+                    console.log(`[Gemini] KB '${f.name}': text is empty, fetching from S3: ${f.s3Url}`);
+                    try {
+                        const buffer = await fetchBuffer(f.s3Url);
+                        const ext = (f.name || '').split('.').pop().toLowerCase();
+                        let text = '';
+                        if (ext === 'pdf') {
+                            const pdfParse = require('pdf-parse');
+                            const data = await pdfParse(buffer);
+                            text = data.text || '';
+                        } else {
+                            text = buffer.toString('utf-8');
+                        }
+                        console.log(`[Gemini] KB '${f.name}': fetched from S3, extracted ${text.length} chars`);
+                        return { ...f, text };
+                    } catch (err) {
+                        console.error(`[Gemini] KB '${f.name}': S3 fetch/parse failed:`, err.message);
+                        return { ...f, text: '' };
+                    }
+                }
+
+                console.warn(`[Gemini] KB '${f.name}': text is empty and no s3Url — skipping`);
+                return { ...f };
+            }));
+
+            const kbText = resolvedKB
                 .filter(f => f.text && f.text.trim().length > 0)
                 .map(f => `--- ${f.name} ---\n${f.text.trim()}`)
                 .join('\n\n');
+
             if (kbText) {
                 systemPrompt += `\n\n[KNOWLEDGE BASE - Use this information to answer questions accurately]\n${kbText}`;
-                console.log(`[Gemini] Injected ${knowledgeBase.length} KB file(s) into system prompt (${kbText.length} chars)`);
+                console.log(`[Gemini] ✅ Injected ${resolvedKB.filter(f => f.text?.trim()).length} KB file(s) into system prompt (${kbText.length} chars)`);
+            } else {
+                console.warn(`[Gemini] ⚠️ KB present (${knowledgeBase.length} file(s)) but all text is empty — KB NOT injected`);
             }
         }
 

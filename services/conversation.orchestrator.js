@@ -75,7 +75,9 @@ class ConversationOrchestrator extends EventEmitter {
         console.log('[Orchestrator] Starting conversation');
 
         // Initialize Gemini with agent configuration + knowledge base
-        this.gemini.initializeConversation({
+        // IMPORTANT: await here because initializeConversation is async
+        // (it may need to fetch KB text from S3 if DB copy is empty)
+        await this.gemini.initializeConversation({
             ...(this.agentConfig.model || {}),
             knowledgeBase: this.agentConfig.knowledgeBase || []
         });

@@ -47,9 +47,13 @@ async function extractText(buffer, ext) {
         try {
             const pdfParse = require('pdf-parse');
             const data = await pdfParse(buffer);
-            return data.text || '';
+            const text = data.text || '';
+            if (!text.trim()) {
+                console.warn('[Files] PDF parsed but no text extracted — PDF may be image-based or encrypted');
+            }
+            return text;
         } catch (err) {
-            console.error('[Files] PDF parse error:', err.message);
+            console.error('[Files] PDF parse FAILED:', err.message, err.stack);
             return ''; // Return empty on parse failure
         }
     }
@@ -71,9 +75,13 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         const id = `kb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
         // 1. Extract text from the buffer
-        console.log(`[Files] Extracting text from ${req.file.originalname} (${ext})`);
+        console.log(`[Files] Extracting text from ${req.file.originalname} (${ext}, ${req.file.size} bytes)`);
         const text = await extractText(req.file.buffer, ext);
-        console.log(`[Files] Extracted ${text.length} chars from ${req.file.originalname}`);
+        if (!text || text.trim().length === 0) {
+            console.warn(`[Files] ⚠️ Extracted 0 chars from ${req.file.originalname} — KB will be empty!`);
+        } else {
+            console.log(`[Files] ✅ Extracted ${text.length} chars from ${req.file.originalname}`);
+        }
 
         // 2. Upload original file to S3 (if configured)
         let s3Url = null;
