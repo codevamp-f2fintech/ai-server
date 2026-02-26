@@ -45,9 +45,23 @@ const s3Client = new S3Client({
 async function extractText(buffer, ext) {
     if (ext === '.pdf') {
         try {
-            // Use raw lib path to avoid the bundled dist's browser-only polyfills
-            // (DOMMatrix, ImageData etc.) that crash in Node.js environments
-            const pdfParse = require('pdf-parse/lib/pdf-parse.js');
+            // Polyfill browser-only globals that pdf-parse's bundled pdfjs requires on load.
+            // These stubs satisfy the reference check; actual rendering is not needed for text extraction.
+            if (typeof global.DOMMatrix === 'undefined') {
+                global.DOMMatrix = class DOMMatrix {
+                    constructor() { this.a = 1; this.b = 0; this.c = 0; this.d = 1; this.e = 0; this.f = 0; }
+                };
+            }
+            if (typeof global.ImageData === 'undefined') {
+                global.ImageData = class ImageData {
+                    constructor(w, h) { this.width = w || 0; this.height = h || 0; this.data = new Uint8ClampedArray(w * h * 4); }
+                };
+            }
+            if (typeof global.Path2D === 'undefined') {
+                global.Path2D = class Path2D { moveTo() { } lineTo() { } arc() { } closePath() { } };
+            }
+
+            const pdfParse = require('pdf-parse');
             const data = await pdfParse(buffer);
             const text = data.text || '';
             if (!text.trim()) {

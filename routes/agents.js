@@ -25,8 +25,22 @@ async function refetchKbText(s3Url, fileName) {
                     try {
                         const ext = (fileName || '').split('.').pop()?.toLowerCase();
                         if (ext === 'pdf') {
+                            // Polyfill browser-only globals before loading pdf-parse
+                            if (typeof global.DOMMatrix === 'undefined') {
+                                global.DOMMatrix = class DOMMatrix {
+                                    constructor() { this.a = 1; this.b = 0; this.c = 0; this.d = 1; this.e = 0; this.f = 0; }
+                                };
+                            }
+                            if (typeof global.ImageData === 'undefined') {
+                                global.ImageData = class ImageData {
+                                    constructor(w, h) { this.width = w || 0; this.height = h || 0; this.data = new Uint8ClampedArray(w * h * 4); }
+                                };
+                            }
+                            if (typeof global.Path2D === 'undefined') {
+                                global.Path2D = class Path2D { moveTo() { } lineTo() { } arc() { } closePath() { } };
+                            }
                             // Use raw lib path to avoid browser-only polyfills (DOMMatrix etc.)
-                            const pdfParse = require('pdf-parse/lib/pdf-parse.js');
+                            const pdfParse = require('pdf-parse');
                             const data = await pdfParse(buffer);
                             const text = data.text || '';
                             console.log(`[Agents] Re-extracted ${text.length} chars from S3 KB: ${fileName}`);
