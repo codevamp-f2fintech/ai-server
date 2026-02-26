@@ -118,17 +118,17 @@ class SipMediaBridge {
                 console.log(`[SipMediaBridge] RTP audio in: packet #${session.audioPacketCount}, bytes: ${audio.length}`);
             }
 
-            // Add to recording (caller audio)
-            this.recordingService.addAudioChunk(internalCallId, audio, 'caller');
-
-            // Convert A-law → μ-law before sending to Deepgram.
+            // Convert A-law → μ-law before sending to Deepgram and recording.
             // Deepgram nova-2 (Hindi) only accepts mulaw encoding.
-            // alawmulaw does a clean decode → Int16 PCM → encode path (no broken lookup tables).
+            // Recording also needs consistent μ-law so mixing doesn't produce noise.
             let audioForStt = audio;
             if (codec === 8) {
                 const pcm = alawmulaw.alaw.decode(audio);
                 audioForStt = Buffer.from(alawmulaw.mulaw.encode(pcm));
             }
+
+            // Add to recording AFTER conversion so caller audio is μ-law (same as agent)
+            this.recordingService.addAudioChunk(internalCallId, audioForStt, 'caller');
 
             // Send to orchestrator for speech-to-text
             orchestrator.processIncomingAudio(audioForStt);
