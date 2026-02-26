@@ -50,6 +50,8 @@ async function extractText(buffer, ext) {
             const text = data.text || '';
             if (!text.trim()) {
                 console.warn('[Files] PDF parsed but no text extracted — PDF may be image-based or encrypted');
+            } else {
+                console.log(`[Files] ✅ PDF text extracted: ${text.length} chars, preview: "${text.slice(0, 100).replace(/\n/g, ' ')}..."`);
             }
             return text;
         } catch (err) {

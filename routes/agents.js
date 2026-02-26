@@ -5,6 +5,47 @@ const express = require('express');
 const router = express.Router();
 const Agent = require('../models/Agent');
 const { authenticate } = require('../middleware/auth');
+const https = require('https');
+const http = require('http');
+
+/**
+ * Re-fetch and extract text from S3 URL for a KB entry that has empty text.
+ * Returns the extracted text string, or '' on failure.
+ */
+async function refetchKbText(s3Url, fileName) {
+    return new Promise((resolve) => {
+        try {
+            const urlObj = new URL(s3Url);
+            const proto = urlObj.protocol === 'https:' ? https : http;
+            proto.get(s3Url, (res) => {
+                const chunks = [];
+                res.on('data', (c) => chunks.push(c));
+                res.on('end', async () => {
+                    const buffer = Buffer.concat(chunks);
+                    try {
+                        const ext = (fileName || '').split('.').pop()?.toLowerCase();
+                        if (ext === 'pdf') {
+                            const pdfParse = require('pdf-parse');
+                            const data = await pdfParse(buffer);
+                            const text = data.text || '';
+                            console.log(`[Agents] Re-extracted ${text.length} chars from S3 KB: ${fileName}`);
+                            resolve(text);
+                        } else {
+                            resolve(buffer.toString('utf-8'));
+                        }
+                    } catch (parseErr) {
+                        console.error('[Agents] KB re-extraction parse error:', parseErr.message);
+                        resolve('');
+                    }
+                });
+                res.on('error', (e) => { console.error('[Agents] KB S3 fetch error:', e.message); resolve(''); });
+            }).on('error', (e) => { console.error('[Agents] KB S3 request error:', e.message); resolve(''); });
+        } catch (e) {
+            console.error('[Agents] KB refetch setup error:', e.message);
+            resolve('');
+        }
+    });
+}
 
 // Apply authentication middleware to ALL routes
 router.use(authenticate);
@@ -257,7 +298,24 @@ router.put('/:id', async (req, res) => {
         // Update agent in MongoDB
         agent.name = config.name || agent.name;
         // Extract configuration if it's nested (new format) or use config directly (old format)
-        agent.configuration = config.configuration || config;
+        const newConfig = config.configuration || config;
+
+        // Re-fetch KB text from S3 for any KB entry that has an empty text field
+        if (newConfig.knowledgeBase && Array.isArray(newConfig.knowledgeBase)) {
+            console.log(`[Agents PUT] KB entries received: ${newConfig.knowledgeBase.length}`);
+            for (const kbEntry of newConfig.knowledgeBase) {
+                console.log(`[Agents PUT] KB entry "${kbEntry.name}": text length=${kbEntry.text?.length || 0}, s3Url=${kbEntry.s3Url || 'none'}`);
+                if ((!kbEntry.text || kbEntry.text.trim().length === 0) && kbEntry.s3Url) {
+                    console.log(`[Agents PUT] ⚠️ KB text empty for "${kbEntry.name}" — re-fetching from S3...`);
+                    kbEntry.text = await refetchKbText(kbEntry.s3Url, kbEntry.name);
+                    console.log(`[Agents PUT] ✅ Re-fetched KB text: ${kbEntry.text.length} chars`);
+                }
+            }
+        }
+
+        agent.configuration = newConfig;
+        // CRITICAL: Mongoose Mixed fields require markModified() to detect deep changes
+        agent.markModified('configuration');
         agent.status = config.status || agent.status;
         agent.metadata = {
             description: config.metadata?.description || agent.metadata.description,
@@ -324,7 +382,24 @@ router.patch('/:id', async (req, res) => {
         // Update agent in MongoDB
         agent.name = config.name || agent.name;
         // Extract configuration if it's nested (new format) or use config directly (old format)
-        agent.configuration = config.configuration || config;
+        const newConfig = config.configuration || config;
+
+        // Re-fetch KB text from S3 for any KB entry that has an empty text field
+        if (newConfig.knowledgeBase && Array.isArray(newConfig.knowledgeBase)) {
+            console.log(`[Agents PATCH] KB entries received: ${newConfig.knowledgeBase.length}`);
+            for (const kbEntry of newConfig.knowledgeBase) {
+                console.log(`[Agents PATCH] KB entry "${kbEntry.name}": text length=${kbEntry.text?.length || 0}, s3Url=${kbEntry.s3Url || 'none'}`);
+                if ((!kbEntry.text || kbEntry.text.trim().length === 0) && kbEntry.s3Url) {
+                    console.log(`[Agents PATCH] ⚠️ KB text empty for "${kbEntry.name}" — re-fetching from S3...`);
+                    kbEntry.text = await refetchKbText(kbEntry.s3Url, kbEntry.name);
+                    console.log(`[Agents PATCH] ✅ Re-fetched KB text: ${kbEntry.text.length} chars`);
+                }
+            }
+        }
+
+        agent.configuration = newConfig;
+        // CRITICAL: Mongoose Mixed fields require markModified() to detect deep changes
+        agent.markModified('configuration');
         agent.status = config.status || agent.status;
         agent.metadata = {
             description: config.metadata?.description || agent.metadata.description,
@@ -342,6 +417,9 @@ router.patch('/:id', async (req, res) => {
 
         console.log(`[Agents] Updated agent ${agent._id} for user ${req.userId}`);
         console.log(`[Agents PATCH] Agent phoneNumberId after save:`, agent.phoneNumberId);
+        // Log KB state after save for debugging
+        const savedKb = agent.configuration?.knowledgeBase || [];
+        savedKb.forEach(kb => console.log(`[Agents PATCH] Saved KB "${kb.name}": text length=${kb.text?.length || 0}`));
 
         res.json({
             success: true,
