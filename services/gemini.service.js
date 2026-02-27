@@ -138,12 +138,14 @@ class GeminiService {
         // Start chat session
         // If firstMessage was already spoken, include it in history
         // so Gemini knows what it already said and won't repeat the introduction
+        // NOTE: Gemini SDK requires history to start with 'user' role,
+        // so we prepend a synthetic user turn before the model's firstMessage
         const chatHistory = [];
         if (config.firstMessage) {
-            chatHistory.push({
-                role: 'model',
-                parts: [{ text: config.firstMessage }]
-            });
+            chatHistory.push(
+                { role: 'user', parts: [{ text: '[call connected]' }] },
+                { role: 'model', parts: [{ text: config.firstMessage }] }
+            );
             console.log('[Gemini] firstMessage added to chat history:', config.firstMessage.substring(0, 80));
         }
 
