@@ -259,10 +259,25 @@ class ConversationOrchestrator extends EventEmitter {
                 timestamp: new Date()
             });
 
+            // Check if Gemini wants to end the call
+            const shouldEndCall = fullResponse.includes('[END_CALL]');
+            if (shouldEndCall) {
+                fullResponse = fullResponse.replace(/\[END_CALL\]/g, '').trim();
+                console.log('[Orchestrator] Gemini requested call end via [END_CALL]');
+            }
+
             this.emit('assistant_speech', fullResponse);
 
             // Speak the complete response once
             await this.speak(fullResponse);
+
+            // If Gemini signaled end, hang up after speaking the goodbye
+            if (shouldEndCall && !this._aborted) {
+                console.log('[Orchestrator] Ending call as requested by AI');
+                // Small delay to ensure TTS finishes playing
+                await this.delay(1000);
+                this.end('ai_ended');
+            }
 
         } catch (error) {
             if (this._aborted) {
