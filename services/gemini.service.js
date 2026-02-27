@@ -123,6 +123,13 @@ class GeminiService {
 
         console.log(`[Gemini] Using model: ${modelName}`);
 
+        // If firstMessage was already spoken, append it to the system prompt
+        // so Gemini knows what it already said and won't repeat the introduction
+        if (config.firstMessage) {
+            systemPrompt += `\n\n[IMPORTANT CONTEXT]\nYou have ALREADY greeted the customer with this exact message: "${config.firstMessage}"\nDo NOT introduce yourself again. Do NOT repeat this greeting. The customer has already heard it. Continue the conversation naturally from here. Infer the customer's gender from their name and use "Sir" or "Ma'am" accordingly. If unsure, default to "Sir". Never say "Sir/Ma'am" together.`;
+            console.log('[Gemini] firstMessage appended to system prompt:', config.firstMessage.substring(0, 80));
+        }
+
         // Initialize model
         this.model = this.genAI.getGenerativeModel({
             model: modelName,
@@ -135,22 +142,9 @@ class GeminiService {
             systemInstruction: systemPrompt
         });
 
-        // Start chat session
-        // If firstMessage was already spoken, include it in history
-        // so Gemini knows what it already said and won't repeat the introduction
-        // NOTE: Gemini SDK requires history to start with 'user' role,
-        // so we prepend a synthetic user turn before the model's firstMessage
-        const chatHistory = [];
-        if (config.firstMessage) {
-            chatHistory.push(
-                { role: 'user', parts: [{ text: 'The call is now connected. You have already introduced yourself. Do not greet or introduce yourself again. Just respond naturally to what the customer says next.' }] },
-                { role: 'model', parts: [{ text: config.firstMessage }] }
-            );
-            console.log('[Gemini] firstMessage added to chat history:', config.firstMessage.substring(0, 80));
-        }
-
+        // Start chat session with empty history
         this.chat = this.model.startChat({
-            history: chatHistory,
+            history: [],
             generationConfig: {
                 temperature: config.temperature || 0.7,
                 maxOutputTokens: config.maxTokens || 500
