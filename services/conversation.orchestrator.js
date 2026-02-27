@@ -96,6 +96,29 @@ class ConversationOrchestrator extends EventEmitter {
         // Speak first message if configured
         if (this.agentConfig.firstMessageMode === 'assistant-speaks-first' &&
             this.agentConfig.firstMessage) {
+
+            // IMPORTANT: Add firstMessage to Gemini's chat history so it knows
+            // it already greeted the user and won't introduce itself again
+            this.gemini.conversationHistory.push({
+                role: 'assistant',
+                content: this.agentConfig.firstMessage
+            });
+            // Also inject into the Gemini chat session's internal history
+            // by sending a dummy user ack and the firstMessage as model response
+            if (this.gemini.chat) {
+                this.gemini.chat._history = [{
+                    role: 'model',
+                    parts: [{ text: this.agentConfig.firstMessage }]
+                }];
+            }
+
+            // Add to conversation log for transcript
+            this.conversationLog.push({
+                role: 'assistant',
+                content: this.agentConfig.firstMessage,
+                timestamp: new Date()
+            });
+
             await this.speak(this.agentConfig.firstMessage);
         } else {
             this.state = 'listening';
