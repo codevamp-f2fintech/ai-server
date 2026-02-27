@@ -108,7 +108,16 @@ class MediaStreamServer {
         const { streamSid, callSid, customParameters } = msg.start;
         const agentId = customParameters?.agentId;
 
+        // Parse dynamic variables from customParameters (passed from TwiML)
+        let variables = {};
+        if (customParameters?.variables) {
+            try { variables = JSON.parse(customParameters.variables); } catch (e) { /* ignore */ }
+        }
+
         console.log(`[MediaStream] Stream started: ${streamSid}, Call: ${callSid}, Agent: ${agentId}`);
+        if (Object.keys(variables).length > 0) {
+            console.log(`[MediaStream] Variables:`, variables);
+        }
 
         // Store streamSid on WebSocket for sending audio back
         ws.streamSid = streamSid;
@@ -132,6 +141,20 @@ class MediaStreamServer {
             if (actualConfig && actualConfig.configuration && actualConfig.configuration.voice) {
                 console.log('[MediaStream] Found nested configuration, unwrapping...');
                 actualConfig = actualConfig.configuration;
+            }
+
+            // Apply {{variable}} substitution to firstMessage
+            if (Object.keys(variables).length > 0 && actualConfig?.firstMessage) {
+                for (const [key, value] of Object.entries(variables)) {
+                    actualConfig.firstMessage = actualConfig.firstMessage.replace(
+                        new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(value)
+                    );
+                }
+                console.log('[MediaStream] firstMessage after substitution:', actualConfig.firstMessage);
+            }
+            // Strip any unresolved {{...}} placeholders
+            if (actualConfig?.firstMessage) {
+                actualConfig.firstMessage = actualConfig.firstMessage.replace(/\{\{\w+\}\}/g, '').replace(/\s{2,}/g, ' ').trim();
             }
 
             console.log('[MediaStream] Configuration keys:', Object.keys(actualConfig || {}));
@@ -312,6 +335,32 @@ class MediaStreamServer {
             const recordingUrl = await this.recordingService.stopAndUpload(callSid);
             console.log('[MediaStream] Recording URL:', recordingUrl || 'None');
 
+            // Generate AI summary from conversation log using Gemini
+            let summary = '';
+            if (data.conversationLog && data.conversationLog.length > 0) {
+                try {
+                    const { GoogleGenerativeAI } = require('@google/generative-ai');
+                    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+                    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
+                    const transcriptText = data.conversationLog
+                        .map(m => `${m.role === 'user' ? 'Customer' : 'AI Agent'}: ${m.content}`)
+                        .join('\n');
+
+                    const result = await model.generateContent(
+                        `Summarize this phone call conversation in 2-3 concise sentences. Focus on the key topics discussed, any decisions made, and the outcome of the call. Do not use markdown formatting:\n\n${transcriptText}`
+                    );
+                    summary = result.response.text();
+                    console.log('[MediaStream] AI Summary generated:', summary.substring(0, 100));
+                } catch (err) {
+                    console.error('[MediaStream] Failed to generate AI summary:', err.message);
+                    // Fallback to basic summary
+                    const userMsgs = data.conversationLog.filter(m => m.role === 'user').length;
+                    const aiMsgs = data.conversationLog.filter(m => m.role === 'assistant').length;
+                    summary = `Conversation with ${userMsgs} customer messages and ${aiMsgs} agent responses.`;
+                }
+            }
+
             await Call.findByIdAndUpdate(
                 callSid,
                 {
@@ -320,13 +369,14 @@ class MediaStreamServer {
                     transcript: JSON.stringify(data.conversationLog),
                     messages: data.conversationLog,
                     recordingUrl: recordingUrl || undefined,
+                    summary,
                     endedAt: new Date(),
                     updatedAt: new Date()
                 },
                 { upsert: true }
             );
 
-            console.log('[MediaStream] Conversation log saved with recording');
+            console.log('[MediaStream] Conversation log saved with recording and AI summary');
         } catch (error) {
             console.error('[MediaStream] Error saving conversation log:', error);
         }

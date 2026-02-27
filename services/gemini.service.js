@@ -66,9 +66,11 @@ class GeminiService {
                         const ext = (f.name || '').split('.').pop().toLowerCase();
                         let text = '';
                         if (ext === 'pdf') {
-                            const pdfParse = require('pdf-parse');
-                            const data = await pdfParse(buffer);
-                            text = data.text || '';
+                            const { PDFParse } = require('pdf-parse');
+                            const parser = new PDFParse({ data: new Uint8Array(buffer) });
+                            const parsed = await parser.getText();
+                            text = parsed.text || '';
+                            await parser.destroy();
                         } else {
                             text = buffer.toString('utf-8');
                         }

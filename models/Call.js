@@ -38,7 +38,9 @@ const callSchema = new mongoose.Schema({
     },
     // Agent tracking
     agentId: String, // Reference to Agent._id
-    agentName: String // Agent name at time of call
+    agentName: String, // Agent name at time of call
+    // Dynamic variables passed at call time (e.g. { name: 'Talha' })
+    variables: mongoose.Schema.Types.Mixed
 }, { _id: false, timestamps: true });
 
 const Call = mongoose.model('Call', callSchema);

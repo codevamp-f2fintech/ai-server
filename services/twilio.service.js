@@ -89,16 +89,23 @@ class TwilioService {
      * @param {string} to - Phone number to call
      * @param {string} agentId - Agent ID to use
      * @param {string} webhookUrl - Base URL for webhooks
+     * @param {Object} [variables] - Optional dynamic variables for first message substitution
      * @returns {Promise<Object>} - Call object
      */
-    async makeCall(to, agentId, webhookUrl) {
+    async makeCall(to, agentId, webhookUrl, variables) {
         try {
             console.log(`[Twilio] Making call to ${to} with agent ${agentId}`);
+
+            // Build webhook URL with agentId and optional variables
+            let voiceUrl = `${webhookUrl}/webhooks/twilio/voice?agentId=${agentId}`;
+            if (variables && typeof variables === 'object' && Object.keys(variables).length > 0) {
+                voiceUrl += `&variables=${encodeURIComponent(JSON.stringify(variables))}`;
+            }
 
             const call = await this.client.calls.create({
                 to,
                 from: this.phoneNumber,
-                url: `${webhookUrl}/webhooks/twilio/voice?agentId=${agentId}`,
+                url: voiceUrl,
                 statusCallback: `${webhookUrl}/webhooks/twilio/status`,
                 statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
                 record: true, // Enable recording

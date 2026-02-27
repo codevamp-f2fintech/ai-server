@@ -23,8 +23,9 @@ class SipMediaBridge {
      * @param {string} sipCallId - SIP Call-ID header value
      * @param {Object} agent - Agent document from database
      * @param {Object} apiKeys - API keys for AI services
+     * @param {Object} [variables] - Optional dynamic variables for first message substitution
      */
-    async startSession(internalCallId, sipService, sipCallId, agent, apiKeys) {
+    async startSession(internalCallId, sipService, sipCallId, agent, apiKeys, variables) {
         console.log(`[SipMediaBridge] Starting session for call ${internalCallId}`);
         console.log(`[SipMediaBridge] Agent: ${agent.name}, SIP Call-ID: ${sipCallId}`);
 
@@ -34,13 +35,26 @@ class SipMediaBridge {
             const cfg = agent.configuration || {};
             const transcriberConfig = { ...(cfg.transcriber || {}) };
 
+            // Apply {{variable}} substitution to firstMessage
+            let firstMessage = cfg.firstMessage || 'Hello! How can I help you today?';
+            if (variables && typeof variables === 'object') {
+                for (const [key, value] of Object.entries(variables)) {
+                    firstMessage = firstMessage.replace(
+                        new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(value)
+                    );
+                }
+                console.log('[SipMediaBridge] firstMessage after substitution:', firstMessage);
+            }
+            // Strip any unresolved {{...}} placeholders
+            firstMessage = firstMessage.replace(/\{\{\w+\}\}/g, '').replace(/\s{2,}/g, ' ').trim();
+
             const orchestrator = new ConversationOrchestrator(
                 {
                     model: cfg.model || {},
                     voice: cfg.voice || {},
                     transcriber: transcriberConfig,
                     knowledgeBase: cfg.knowledgeBase || [],   // ← KB text for Gemini injection
-                    firstMessage: cfg.firstMessage || 'Hello! How can I help you today?',
+                    firstMessage,
                     firstMessageMode: cfg.firstMessageMode || 'assistant-speaks-first',
                     maxDurationSeconds: cfg.maxDurationSeconds || 600,
                     silenceTimeoutSeconds: cfg.silenceTimeoutSeconds || 30,
@@ -269,6 +283,9 @@ class SipMediaBridge {
 
             // 5. Update Call record in database
             try {
+                // Generate AI summary using Gemini
+                const summary = await this.generateCallSummary(conversationLog);
+
                 await Call.findByIdAndUpdate(
                     internalCallId,
                     {
@@ -278,7 +295,7 @@ class SipMediaBridge {
                         durationSeconds: Math.round(duration),
                         transcript: JSON.stringify(conversationLog),
                         recordingUrl: recordingUrl || undefined,
-                        summary: this.generateCallSummary(conversationLog)
+                        summary
                     },
                     { upsert: false }
                 );
@@ -309,9 +326,9 @@ class SipMediaBridge {
     }
 
     /**
-     * Generate a simple call summary from conversation log
+     * Generate AI call summary using Gemini
      */
-    generateCallSummary(conversationLog) {
+    async generateCallSummary(conversationLog) {
         const userMessages = conversationLog.filter(m => m.role === 'user');
         const assistantMessages = conversationLog.filter(m => m.role === 'assistant');
 
@@ -319,7 +336,25 @@ class SipMediaBridge {
             return 'No conversation recorded';
         }
 
-        return `Conversation with ${userMessages.length} user messages and ${assistantMessages.length} assistant responses`;
+        try {
+            const { GoogleGenerativeAI } = require('@google/generative-ai');
+            const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+            const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
+            const transcriptText = conversationLog
+                .map(m => `${m.role === 'user' ? 'Customer' : 'AI Agent'}: ${m.content}`)
+                .join('\n');
+
+            const result = await model.generateContent(
+                `Summarize this phone call conversation in 2-3 concise sentences. Focus on the key topics discussed, any decisions made, and the outcome of the call. Do not use markdown formatting:\n\n${transcriptText}`
+            );
+            const summary = result.response.text();
+            console.log('[SipMediaBridge] AI Summary generated:', summary.substring(0, 100));
+            return summary;
+        } catch (err) {
+            console.error('[SipMediaBridge] Failed to generate AI summary:', err.message);
+            return `Conversation with ${userMessages.length} customer messages and ${assistantMessages.length} agent responses.`;
+        }
     }
 
     /**

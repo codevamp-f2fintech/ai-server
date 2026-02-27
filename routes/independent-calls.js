@@ -20,7 +20,7 @@ const SipTrunkService = require('../services/sip-trunk.service');
  */
 router.post('/outbound', authenticate, async (req, res) => {
     try {
-        const { to, agentId } = req.body;
+        const { to, agentId, variables } = req.body;
 
         if (!to) {
             return res.status(400).json({ error: 'Phone number is required' });
@@ -60,6 +60,24 @@ router.post('/outbound', authenticate, async (req, res) => {
             console.log('[IndependentCalls] Phone number provider:', phoneNumber?.provider);
         }
 
+        // Resolve nested configuration and apply {{variable}} substitution
+        let actualConfig = agent.configuration || {};
+        if (actualConfig.configuration && actualConfig.configuration.voice) {
+            actualConfig = actualConfig.configuration;
+        }
+        if (variables && typeof variables === 'object' && actualConfig.firstMessage) {
+            for (const [key, value] of Object.entries(variables)) {
+                actualConfig.firstMessage = actualConfig.firstMessage.replace(
+                    new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(value)
+                );
+            }
+            console.log('[IndependentCalls] firstMessage after variable substitution:', actualConfig.firstMessage);
+        }
+        // Strip any unresolved {{...}} placeholders so agent doesn't say them literally
+        if (actualConfig.firstMessage) {
+            actualConfig.firstMessage = actualConfig.firstMessage.replace(/\{\{\w+\}\}/g, '').replace(/\s{2,}/g, ' ').trim();
+        }
+
         const Call = require('../models/Call');
         let call, callRecord;
 
@@ -90,7 +108,7 @@ router.post('/outbound', authenticate, async (req, res) => {
                 };
 
                 try {
-                    await sipMediaBridge.startSession(iCallId, sipService, callId, agent, apiKeys);
+                    await sipMediaBridge.startSession(iCallId, sipService, callId, agent, apiKeys, variables);
                     console.log('[IndependentCalls] Media bridge session started');
                 } catch (err) {
                     console.error('[IndependentCalls] Failed to start media bridge:', err);
@@ -125,6 +143,7 @@ router.post('/outbound', authenticate, async (req, res) => {
                 phoneCallProvider: 'sip-trunk',
                 phoneCallProviderId: call.sipCallId,
                 phoneCallTransport: 'sip',
+                variables: variables || undefined,
                 startedAt: new Date(),
                 createdAt: new Date()
             });
@@ -135,11 +154,12 @@ router.post('/outbound', authenticate, async (req, res) => {
             // Create TwilioService with agent's phone number credentials (or fallback to .env)
             const twilioService = await TwilioService.createFromAgent(agent);
 
-            // Make call via Twilio
+            // Make call via Twilio (pass variables as custom params)
             call = await twilioService.makeCall(
                 to,
                 agentId,
-                process.env.BASE_URL
+                process.env.BASE_URL,
+                variables
             );
 
             // Save call to database
@@ -154,6 +174,7 @@ router.post('/outbound', authenticate, async (req, res) => {
                 phoneCallProvider: 'twilio',
                 phoneCallProviderId: call.sid,
                 phoneCallTransport: 'pstn',
+                variables: variables || undefined,
                 startedAt: new Date(),
                 createdAt: new Date()
             });
@@ -194,10 +215,16 @@ router.post('/outbound', authenticate, async (req, res) => {
  */
 router.post('/webhooks/twilio/voice', async (req, res) => {
     try {
-        const { agentId } = req.query;
+        const { agentId, variables: variablesParam } = req.query;
         const { CallSid, From, To, Direction } = req.body;
 
         console.log(`[IndependentCalls] Call webhook: ${CallSid}, Direction: ${Direction}, Agent: ${agentId}`);
+
+        // Parse variables from query string if present
+        let variables = {};
+        if (variablesParam) {
+            try { variables = JSON.parse(variablesParam); } catch (e) { /* ignore */ }
+        }
 
         // Load agent
         const agent = await Agent.findById(agentId);
@@ -217,12 +244,16 @@ router.post('/webhooks/twilio/voice', async (req, res) => {
 
         console.log(`[IndependentCalls] WebSocket URL: ${streamUrl}`);
 
-        // Generate TwiML to connect to media stream
-        const twiml = twilioService.generateStreamTwiML(streamUrl, {
+        // Generate TwiML to connect to media stream (pass variables as custom params)
+        const customParams = {
             agentId,
             callSid: CallSid,
             direction: Direction
-        });
+        };
+        if (Object.keys(variables).length > 0) {
+            customParams.variables = JSON.stringify(variables);
+        }
+        const twiml = twilioService.generateStreamTwiML(streamUrl, customParams);
 
         res.type('text/xml');
         res.send(twiml);
