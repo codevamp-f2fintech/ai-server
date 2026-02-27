@@ -136,8 +136,19 @@ class GeminiService {
         });
 
         // Start chat session
+        // If firstMessage was already spoken, include it in history
+        // so Gemini knows what it already said and won't repeat the introduction
+        const chatHistory = [];
+        if (config.firstMessage) {
+            chatHistory.push({
+                role: 'model',
+                parts: [{ text: config.firstMessage }]
+            });
+            console.log('[Gemini] firstMessage added to chat history:', config.firstMessage.substring(0, 80));
+        }
+
         this.chat = this.model.startChat({
-            history: [],
+            history: chatHistory,
             generationConfig: {
                 temperature: config.temperature || 0.7,
                 maxOutputTokens: config.maxTokens || 500
@@ -145,6 +156,9 @@ class GeminiService {
         });
 
         this.conversationHistory = [];
+        if (config.firstMessage) {
+            this.conversationHistory.push({ role: 'assistant', content: config.firstMessage });
+        }
         console.log('[Gemini] Conversation initialized');
     }
 

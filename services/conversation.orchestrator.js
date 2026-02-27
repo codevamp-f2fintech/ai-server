@@ -22,6 +22,7 @@ function stripMarkdown(text) {
         .replace(/^\s*[-*+]\s+/gm, '')         // - bullet -> (removed)
         .replace(/^\s*\d+\.\s+/gm, '')        // 1. list -> (removed)
         .replace(/\n{3,}/g, '\n\n')           // Collapse extra blank lines
+        .replace(/\s{2,}/g, ' ')              // Collapse multiple spaces
         .trim();
 }
 
@@ -77,9 +78,12 @@ class ConversationOrchestrator extends EventEmitter {
         // Initialize Gemini with agent configuration + knowledge base
         // IMPORTANT: await here because initializeConversation is async
         // (it may need to fetch KB text from S3 if DB copy is empty)
+        // Pass firstMessage so Gemini knows what was already said
         await this.gemini.initializeConversation({
             ...(this.agentConfig.model || {}),
-            knowledgeBase: this.agentConfig.knowledgeBase || []
+            knowledgeBase: this.agentConfig.knowledgeBase || [],
+            firstMessage: (this.agentConfig.firstMessageMode === 'assistant-speaks-first' && this.agentConfig.firstMessage)
+                ? this.agentConfig.firstMessage : null
         });
 
         // Set up max duration timer
@@ -96,21 +100,6 @@ class ConversationOrchestrator extends EventEmitter {
         // Speak first message if configured
         if (this.agentConfig.firstMessageMode === 'assistant-speaks-first' &&
             this.agentConfig.firstMessage) {
-
-            // IMPORTANT: Add firstMessage to Gemini's chat history so it knows
-            // it already greeted the user and won't introduce itself again
-            this.gemini.conversationHistory.push({
-                role: 'assistant',
-                content: this.agentConfig.firstMessage
-            });
-            // Also inject into the Gemini chat session's internal history
-            // by sending a dummy user ack and the firstMessage as model response
-            if (this.gemini.chat) {
-                this.gemini.chat._history = [{
-                    role: 'model',
-                    parts: [{ text: this.agentConfig.firstMessage }]
-                }];
-            }
 
             // Add to conversation log for transcript
             this.conversationLog.push({
@@ -149,7 +138,7 @@ class ConversationOrchestrator extends EventEmitter {
     }
 
     /**
-     * Handle user speech
+     * Handle user speech - with accumulation buffer to merge consecutive finals
      */
     async onUserSpeech(transcript) {
         if (this.state === 'ended' || this._aborted) return;
@@ -161,31 +150,51 @@ class ConversationOrchestrator extends EventEmitter {
             this.elevenlabs.stop();
         }
 
-        // Log conversation
-        this.conversationLog.push({
-            role: 'user',
-            content: transcript,
-            timestamp: new Date()
-        });
-
         this.emit('user_speech', transcript);
 
         // Reset silence timer
         this.resetSilenceTimer();
 
-        // Add configured response delay
-        if (this.agentConfig.responseDelaySeconds) {
-            await this.delay(this.agentConfig.responseDelaySeconds * 1000);
+        // Accumulate transcript - wait briefly for more finals before sending to Gemini
+        if (!this._pendingTranscript) {
+            this._pendingTranscript = transcript;
+        } else {
+            this._pendingTranscript += ' ' + transcript;
         }
 
-        // Check again after delay - call may have ended during wait
-        if (this._aborted) {
-            console.log('[Orchestrator] Call ended during response delay, aborting');
-            return;
+        // Clear previous accumulation timer
+        if (this._transcriptAccumTimer) {
+            clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Get AI response
-        await this.getAIResponse(transcript);
+        // Wait 800ms for more transcript finals before processing
+        this._transcriptAccumTimer = setTimeout(async () => {
+            if (this._aborted || this.state === 'ended') return;
+
+            const fullTranscript = this._pendingTranscript;
+            this._pendingTranscript = null;
+
+            // Log conversation
+            this.conversationLog.push({
+                role: 'user',
+                content: fullTranscript,
+                timestamp: new Date()
+            });
+
+            // Add configured response delay
+            if (this.agentConfig.responseDelaySeconds) {
+                await this.delay(this.agentConfig.responseDelaySeconds * 1000);
+            }
+
+            // Check again after delay - call may have ended during wait
+            if (this._aborted) {
+                console.log('[Orchestrator] Call ended during response delay, aborting');
+                return;
+            }
+
+            // Get AI response with accumulated transcript
+            await this.getAIResponse(fullTranscript);
+        }, 800);
     }
 
     /**
@@ -374,6 +383,9 @@ class ConversationOrchestrator extends EventEmitter {
         this.clearSilenceTimer();
         if (this.maxDurationTimer) {
             clearTimeout(this.maxDurationTimer);
+        }
+        if (this._transcriptAccumTimer) {
+            clearTimeout(this._transcriptAccumTimer);
         }
 
         // Close services
