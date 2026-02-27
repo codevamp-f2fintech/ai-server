@@ -143,7 +143,7 @@ class GeminiService {
         const chatHistory = [];
         if (config.firstMessage) {
             chatHistory.push(
-                { role: 'user', parts: [{ text: '[call connected]' }] },
+                { role: 'user', parts: [{ text: 'The call is now connected. You have already introduced yourself. Do not greet or introduce yourself again. Just respond naturally to what the customer says next.' }] },
                 { role: 'model', parts: [{ text: config.firstMessage }] }
             );
             console.log('[Gemini] firstMessage added to chat history:', config.firstMessage.substring(0, 80));

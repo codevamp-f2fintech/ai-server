@@ -138,7 +138,7 @@ class ConversationOrchestrator extends EventEmitter {
     }
 
     /**
-     * Handle user speech - with accumulation buffer to merge consecutive finals
+     * Handle user speech - with accumulation buffer and thinking guard
      */
     async onUserSpeech(transcript) {
         if (this.state === 'ended' || this._aborted) return;
@@ -155,6 +155,17 @@ class ConversationOrchestrator extends EventEmitter {
         // Reset silence timer
         this.resetSilenceTimer();
 
+        // If Gemini is already thinking, queue the transcript for after it responds
+        if (this._isThinking) {
+            console.log(`[Orchestrator] Gemini busy, queueing transcript`);
+            if (!this._queuedTranscript) {
+                this._queuedTranscript = transcript;
+            } else {
+                this._queuedTranscript += ' ' + transcript;
+            }
+            return;
+        }
+
         // Accumulate transcript - wait briefly for more finals before sending to Gemini
         if (!this._pendingTranscript) {
             this._pendingTranscript = transcript;
@@ -167,7 +178,7 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Wait 800ms for more transcript finals before processing
+        // Wait 1200ms for more transcript finals before processing
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -194,7 +205,20 @@ class ConversationOrchestrator extends EventEmitter {
 
             // Get AI response with accumulated transcript
             await this.getAIResponse(fullTranscript);
-        }, 800);
+
+            // After Gemini responds, check if more transcripts were queued
+            if (this._queuedTranscript && !this._aborted) {
+                const queued = this._queuedTranscript;
+                this._queuedTranscript = null;
+                console.log(`[Orchestrator] Processing queued transcript: ${queued}`);
+                this.conversationLog.push({
+                    role: 'user',
+                    content: queued,
+                    timestamp: new Date()
+                });
+                await this.getAIResponse(queued);
+            }
+        }, 1200);
     }
 
     /**
@@ -204,6 +228,7 @@ class ConversationOrchestrator extends EventEmitter {
         if (this._aborted) return;
 
         this.state = 'thinking';
+        this._isThinking = true;
         this.emit('thinking');
 
         // CRITICAL: Clear buffer before generating speech to prevent echo
@@ -223,6 +248,7 @@ class ConversationOrchestrator extends EventEmitter {
             // CRITICAL: Check if call ended while Gemini was processing
             if (this._aborted) {
                 console.log('[Orchestrator] Call ended during AI processing, skipping TTS');
+                this._isThinking = false;
                 return;
             }
 
@@ -239,7 +265,10 @@ class ConversationOrchestrator extends EventEmitter {
             await this.speak(fullResponse);
 
         } catch (error) {
-            if (this._aborted) return; // Don't recover if call is dead
+            if (this._aborted) {
+                this._isThinking = false;
+                return;
+            }
             console.error('[Orchestrator] Error getting AI response:', error);
             this.emit('error', error);
 
@@ -253,6 +282,8 @@ class ConversationOrchestrator extends EventEmitter {
                 // If we can't even speak, end the call
                 this.end('error');
             }
+        } finally {
+            this._isThinking = false;
         }
     }
 

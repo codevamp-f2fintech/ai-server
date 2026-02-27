@@ -92,15 +92,6 @@ class DeepgramService {
                 if (this._transcriptEventCount <= 5) {
                     console.log(`[Deepgram] Empty transcript event (${isFinal ? 'final' : 'interim'})`);
                 }
-
-                // If we get an empty final but have a pending interim, use the interim
-                if (isFinal && this._lastInterimTranscript && !this._ignoreTranscripts) {
-                    console.log(`[Deepgram] Empty final received, using pending interim: ${this._lastInterimTranscript}`);
-                    this._clearInterimTimer();
-                    const pendingTranscript = this._lastInterimTranscript;
-                    this._lastInterimTranscript = '';
-                    if (onTranscript) onTranscript(pendingTranscript);
-                }
             }
         });
 
