@@ -43,8 +43,8 @@ class ElevenLabsService {
             console.log(`[ElevenLabs] Converting to speech: ${text.substring(0, 50)}...`);
             console.log(`[ElevenLabs] Using voice ID: ${voiceId}`);
 
-            // Use configured model or default to eleven_multilingual_v2 (supports Hindi)
-            const modelId = config.model || 'eleven_multilingual_v2';
+            // Use configured model or default to eleven_v3 (highest quality, real-time streaming)
+            const modelId = config.model || 'eleven_v3';
             const isV3 = isV3Model(modelId);
 
             // Build TTS request body

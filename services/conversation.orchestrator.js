@@ -41,7 +41,7 @@ class ConversationOrchestrator extends EventEmitter {
         if (!this.agentConfig.firstMessageMode) this.agentConfig.firstMessageMode = 'assistant-speaks-first';
         if (!this.agentConfig.maxDurationSeconds) this.agentConfig.maxDurationSeconds = 600;
         if (!this.agentConfig.silenceTimeoutSeconds) this.agentConfig.silenceTimeoutSeconds = 30;
-        if (!this.agentConfig.responseDelaySeconds) this.agentConfig.responseDelaySeconds = 0.4;
+        if (!this.agentConfig.responseDelaySeconds) this.agentConfig.responseDelaySeconds = 0.1;
 
         console.log('[Orchestrator] Agent config loaded:');
         console.log('  - Voice ID:', this.agentConfig.voice?.voiceId || 'MISSING - will use default');
@@ -178,7 +178,7 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Wait 1200ms for more transcript finals before processing
+        // Wait 300ms for more transcript finals before processing (reduced from 1200ms)
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -218,11 +218,14 @@ class ConversationOrchestrator extends EventEmitter {
                 });
                 await this.getAIResponse(queued);
             }
-        }, 1200);
+        }, 300);
     }
 
     /**
-     * Get AI response and speak it
+     * Get AI response and speak it — sentence-boundary streaming mode.
+     * Gemini chunks are detected for sentence endings; each sentence is sent
+     * to ElevenLabs TTS immediately, so audio starts playing while Gemini
+     * is still generating the rest of the response.
      */
     async getAIResponse(userMessage) {
         if (this._aborted) return;
@@ -235,20 +238,83 @@ class ConversationOrchestrator extends EventEmitter {
         this.deepgram.clearBuffer();
 
         try {
-            console.log('[Orchestrator] Getting AI response');
+            console.log('[Orchestrator] Getting AI response (sentence-streaming)');
 
             let fullResponse = '';
+            let sentenceBuffer = '';
+            let ttsStarted = false;
 
-            // Get streaming response from Gemini
-            await this.gemini.getResponse(userMessage, async (chunk) => {
+            // Sequential chain of TTS promises — sentences play in order
+            // but Gemini generation overlaps with TTS playback of previous sentences
+            let ttsChain = Promise.resolve();
+
+            // Enqueue a sentence for TTS (sentences play sequentially via promise chain)
+            const enqueueSentence = (sentence) => {
+                sentence = sentence.trim();
+                if (!sentence || this._aborted) return;
+
+                const cleanText = stripMarkdown(sentence);
+                if (!cleanText) return;
+
+                if (!ttsStarted) {
+                    ttsStarted = true;
+                    this.state = 'speaking';
+                    this.emit('speaking', cleanText);
+                    // Clear Deepgram buffer when we start speaking
+                    this.deepgram.clearBuffer();
+                }
+
+                console.log(`[Orchestrator] → TTS sentence: ${cleanText.substring(0, 70)}`);
+
+                ttsChain = ttsChain.then(async () => {
+                    if (this._aborted) return;
+                    await this.elevenlabs.textToSpeechStream(
+                        cleanText,
+                        this.agentConfig.voice,
+                        (chunk) => this.onAudioChunk(chunk)
+                    );
+                    // Flush carry buffer between sentences so every packet is sent
+                    if (!this._aborted) this.emit('audio_flush');
+                });
+            };
+
+            // Extract complete sentences from the running buffer
+            // Handles: . ! ? ।  followed by a space (or comma for natural pauses)
+            const SENTENCE_RE = /^(.*?[.!?।](?=[\s"]))/;
+            const extractSentences = () => {
+                let match;
+                while ((match = SENTENCE_RE.exec(sentenceBuffer)) !== null) {
+                    const sentence = match[1];
+                    sentenceBuffer = sentenceBuffer.substring(match[0].length).trimStart();
+                    enqueueSentence(sentence);
+                }
+            };
+
+            // Stream from Gemini, detecting sentence boundaries in real-time
+            await this.gemini.getResponse(userMessage, (chunk) => {
                 fullResponse += chunk;
-                // Just accumulate, don't stream to TTS chunk-by-chunk
+                sentenceBuffer += chunk;
+                extractSentences();
             });
 
             // CRITICAL: Check if call ended while Gemini was processing
             if (this._aborted) {
-                console.log('[Orchestrator] Call ended during AI processing, skipping TTS');
                 this._isThinking = false;
+                return;
+            }
+
+            // Flush any remaining text (last sentence may lack trailing space)
+            if (sentenceBuffer.trim()) {
+                enqueueSentence(sentenceBuffer);
+                sentenceBuffer = '';
+            }
+
+            // If Gemini returned an empty response, handle gracefully
+            if (!ttsStarted) {
+                console.warn('[Orchestrator] Gemini returned empty response');
+                this.emit('audio_flush');
+                this.state = 'listening';
+                this.startSilenceTimer();
                 return;
             }
 
@@ -268,13 +334,23 @@ class ConversationOrchestrator extends EventEmitter {
 
             this.emit('assistant_speech', fullResponse);
 
-            // Speak the complete response once
-            await this.speak(fullResponse);
+            // Wait for ALL enqueued TTS sentences to finish playing
+            await ttsChain;
 
-            // If Gemini signaled end, hang up after speaking the goodbye
+            if (this._aborted) {
+                this._isThinking = false;
+                return;
+            }
+
+            // Final flush and transition to listening
+            this.emit('audio_flush');
+            this.state = 'listening';
+            console.log('[Orchestrator] All sentences spoken, now listening');
+            this.startSilenceTimer();
+
+            // If Gemini signaled end, hang up after all sentences are spoken
             if (shouldEndCall && !this._aborted) {
                 console.log('[Orchestrator] Ending call as requested by AI');
-                // Small delay to ensure TTS finishes playing
                 await this.delay(1000);
                 this.end('ai_ended');
             }
@@ -287,14 +363,13 @@ class ConversationOrchestrator extends EventEmitter {
             console.error('[Orchestrator] Error getting AI response:', error);
             this.emit('error', error);
 
-            // Graceful error recovery - speak apology and continue listening
+            // Graceful error recovery
             try {
                 const errorMessage = 'Sorry, I encountered an issue. Could you please repeat that?';
                 console.log('[Orchestrator] Speaking error recovery message');
                 await this.speak(errorMessage);
             } catch (speakError) {
                 console.error('[Orchestrator] Failed to speak error message:', speakError);
-                // If we can't even speak, end the call
                 this.end('error');
             }
         } finally {

@@ -58,7 +58,7 @@ class SipMediaBridge {
                     firstMessageMode: cfg.firstMessageMode || 'assistant-speaks-first',
                     maxDurationSeconds: cfg.maxDurationSeconds || 600,
                     silenceTimeoutSeconds: cfg.silenceTimeoutSeconds || 30,
-                    responseDelaySeconds: cfg.responseDelaySeconds || 0.4
+                    responseDelaySeconds: cfg.responseDelaySeconds ?? 0.1
                 },
                 apiKeys
             );
