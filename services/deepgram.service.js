@@ -39,7 +39,7 @@ class DeepgramService {
             sample_rate: 8000,    // 8kHz for telephony
             channels: 1,
             endpointing: 200,     // Detect utterance end after 200ms silence
-            utterance_end_ms: 500, // Fire UtteranceEnd event after 500ms silence (reduced from 1000ms)
+            utterance_end_ms: 1000, // Fire UtteranceEnd event after 1000ms silence (Deepgram minimum is 1000)
             vad_events: true,     // Get speech start/end events
         };
 

@@ -234,7 +234,8 @@ class ConversationOrchestrator extends EventEmitter {
         this._isThinking = true;
         this.emit('thinking');
 
-        // CRITICAL: Clear buffer before generating speech to prevent echo
+        // CRITICAL: Clear Deepgram buffer immediately so stale audio from before
+        // the user finished speaking is discarded
         this.deepgram.clearBuffer();
 
         try {
@@ -243,12 +244,13 @@ class ConversationOrchestrator extends EventEmitter {
             let fullResponse = '';
             let sentenceBuffer = '';
             let ttsStarted = false;
+            let isFirstSentence = true;
 
             // Sequential chain of TTS promises — sentences play in order
-            // but Gemini generation overlaps with TTS playback of previous sentences
+            // but Gemini generation overlaps with TTS playback of earlier sentences
             let ttsChain = Promise.resolve();
 
-            // Enqueue a sentence for TTS (sentences play sequentially via promise chain)
+            // Enqueue a sentence for TTS
             const enqueueSentence = (sentence) => {
                 sentence = sentence.trim();
                 if (!sentence || this._aborted) return;
@@ -260,34 +262,56 @@ class ConversationOrchestrator extends EventEmitter {
                     ttsStarted = true;
                     this.state = 'speaking';
                     this.emit('speaking', cleanText);
-                    // Clear Deepgram buffer when we start speaking
-                    this.deepgram.clearBuffer();
                 }
+
+                const capturedIsFirst = isFirstSentence;
+                isFirstSentence = false;
 
                 console.log(`[Orchestrator] → TTS sentence: ${cleanText.substring(0, 70)}`);
 
                 ttsChain = ttsChain.then(async () => {
                     if (this._aborted) return;
-                    await this.elevenlabs.textToSpeechStream(
-                        cleanText,
-                        this.agentConfig.voice,
-                        (chunk) => this.onAudioChunk(chunk)
-                    );
-                    // Flush carry buffer between sentences so every packet is sent
-                    if (!this._aborted) this.emit('audio_flush');
+
+                    // Clear Deepgram buffer RIGHT BEFORE audio starts playing
+                    // (not during Gemini streaming) so the ignore window is active
+                    // during actual TTS playback, preventing echo transcripts
+                    if (capturedIsFirst) {
+                        this.deepgram.clearBuffer();
+                    }
+
+                    try {
+                        await this.elevenlabs.textToSpeechStream(
+                            cleanText,
+                            this.agentConfig.voice,
+                            (chunk) => this.onAudioChunk(chunk)
+                        );
+                        // Flush carry buffer after each sentence
+                        if (!this._aborted) this.emit('audio_flush');
+                    } catch (ttsError) {
+                        // Don't let one sentence failure kill the whole chain
+                        if (!this._aborted) {
+                            console.error('[Orchestrator] TTS error for sentence:', ttsError.message);
+                        }
+                    }
                 });
             };
 
-            // Extract complete sentences from the running buffer
-            // Handles: . ! ? ।  followed by a space (or comma for natural pauses)
-            const SENTENCE_RE = /^(.*?[.!?।](?=[\s"]))/;
+            // Split sentenceBuffer at natural sentence boundaries.
+            // Uses split-based approach: finds punctuation followed by whitespace.
+            // The last sentence (no trailing whitespace) is held in sentenceBuffer
+            // and flushed after Gemini finishes.
             const extractSentences = () => {
-                let match;
-                while ((match = SENTENCE_RE.exec(sentenceBuffer)) !== null) {
-                    const sentence = match[1];
-                    sentenceBuffer = sentenceBuffer.substring(match[0].length).trimStart();
-                    enqueueSentence(sentence);
+                // Match punctuation + following whitespace (consume the whitespace as separator)
+                const parts = sentenceBuffer.split(/(?<=[.!?।])\s+/);
+                if (parts.length > 1) {
+                    // All parts except the last are complete sentences
+                    const completeSentences = parts.slice(0, -1);
+                    sentenceBuffer = parts[parts.length - 1]; // remainder (may be partial)
+                    for (const s of completeSentences) {
+                        enqueueSentence(s);
+                    }
                 }
+                // If length === 1, no boundary found yet — keep accumulating
             };
 
             // Stream from Gemini, detecting sentence boundaries in real-time
@@ -299,11 +323,10 @@ class ConversationOrchestrator extends EventEmitter {
 
             // CRITICAL: Check if call ended while Gemini was processing
             if (this._aborted) {
-                this._isThinking = false;
                 return;
             }
 
-            // Flush any remaining text (last sentence may lack trailing space)
+            // Flush any remaining text (last sentence that had no trailing whitespace)
             if (sentenceBuffer.trim()) {
                 enqueueSentence(sentenceBuffer);
                 sentenceBuffer = '';
@@ -338,7 +361,6 @@ class ConversationOrchestrator extends EventEmitter {
             await ttsChain;
 
             if (this._aborted) {
-                this._isThinking = false;
                 return;
             }
 
@@ -357,7 +379,6 @@ class ConversationOrchestrator extends EventEmitter {
 
         } catch (error) {
             if (this._aborted) {
-                this._isThinking = false;
                 return;
             }
             console.error('[Orchestrator] Error getting AI response:', error);
