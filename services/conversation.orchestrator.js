@@ -143,6 +143,8 @@ class ConversationOrchestrator extends EventEmitter {
     async onUserSpeech(transcript) {
         if (this.state === 'ended' || this._aborted) return;
 
+        this._transcriptReceivedAt = Date.now();
+        console.log(`[⏱ LATENCY] Transcript received: "${transcript}"`);
         console.log(`[Orchestrator] User said: ${transcript}`);
 
         // Stop current TTS generation to avoid overlapping if the user interrupts
@@ -184,6 +186,8 @@ class ConversationOrchestrator extends EventEmitter {
 
             const fullTranscript = this._pendingTranscript;
             this._pendingTranscript = null;
+            const accumDone = Date.now();
+            console.log(`[⏱ LATENCY] Accumulation wait: ${accumDone - this._transcriptReceivedAt}ms`);
 
             // Log conversation
             this.conversationLog.push({
@@ -196,6 +200,7 @@ class ConversationOrchestrator extends EventEmitter {
             if (this.agentConfig.responseDelaySeconds) {
                 await this.delay(this.agentConfig.responseDelaySeconds * 1000);
             }
+            console.log(`[⏱ LATENCY] Response delay done: +${this.agentConfig.responseDelaySeconds * 1000}ms`);
 
             // Check again after delay - call may have ended during wait
             if (this._aborted) {
@@ -239,12 +244,14 @@ class ConversationOrchestrator extends EventEmitter {
         this.deepgram.clearBuffer();
 
         try {
-            console.log('[Orchestrator] Getting AI response (sentence-streaming)');
+            const t0 = Date.now();
+            console.log(`[⏱ LATENCY] Gemini start → waiting for first token...`);
 
             let fullResponse = '';
             let sentenceBuffer = '';
             let ttsStarted = false;
             let isFirstSentence = true;
+            let geminiFirstTokenAt = 0;
 
             // Sequential chain of TTS promises — sentences play in order
             // but Gemini generation overlaps with TTS playback of earlier sentences
@@ -262,6 +269,7 @@ class ConversationOrchestrator extends EventEmitter {
                     ttsStarted = true;
                     this.state = 'speaking';
                     this.emit('speaking', cleanText);
+                    console.log(`[⏱ LATENCY] Gemini→TTS first sentence: ${Date.now() - t0}ms since getAIResponse start`);
                 }
 
                 const capturedIsFirst = isFirstSentence;
@@ -280,11 +288,23 @@ class ConversationOrchestrator extends EventEmitter {
                     }
 
                     try {
+                        const ttsStart = Date.now();
+                        let firstChunk = true;
                         await this.elevenlabs.textToSpeechStream(
                             cleanText,
                             this.agentConfig.voice,
-                            (chunk) => this.onAudioChunk(chunk)
+                            (chunk) => {
+                                if (firstChunk) {
+                                    firstChunk = false;
+                                    console.log(`[⏱ LATENCY] TTS first audio byte: ${Date.now() - ttsStart}ms (ElevenLabs TTFA)`);
+                                    if (this._transcriptReceivedAt) {
+                                        console.log(`[⏱ LATENCY] *** TOTAL E2E (transcript→first audio): ${Date.now() - this._transcriptReceivedAt}ms ***`);
+                                    }
+                                }
+                                this.onAudioChunk(chunk);
+                            }
                         );
+                        console.log(`[⏱ LATENCY] TTS sentence done: ${Date.now() - ttsStart}ms total`);
                         // Flush carry buffer after each sentence
                         if (!this._aborted) this.emit('audio_flush');
                     } catch (ttsError) {
@@ -316,10 +336,15 @@ class ConversationOrchestrator extends EventEmitter {
 
             // Stream from Gemini, detecting sentence boundaries in real-time
             await this.gemini.getResponse(userMessage, (chunk) => {
+                if (!geminiFirstTokenAt) {
+                    geminiFirstTokenAt = Date.now();
+                    console.log(`[⏱ LATENCY] Gemini first token: ${geminiFirstTokenAt - t0}ms`);
+                }
                 fullResponse += chunk;
                 sentenceBuffer += chunk;
                 extractSentences();
             });
+            console.log(`[⏱ LATENCY] Gemini total: ${Date.now() - t0}ms (response: ${fullResponse.length} chars)`);
 
             // CRITICAL: Check if call ended while Gemini was processing
             if (this._aborted) {
@@ -367,7 +392,8 @@ class ConversationOrchestrator extends EventEmitter {
             // Final flush and transition to listening
             this.emit('audio_flush');
             this.state = 'listening';
-            console.log('[Orchestrator] All sentences spoken, now listening');
+            const totalTurn = Date.now() - t0;
+            console.log(`[⏱ LATENCY] All speaking done. Turn total: ${totalTurn}ms`);
             this.startSilenceTimer();
 
             // If Gemini signaled end, hang up after all sentences are spoken
