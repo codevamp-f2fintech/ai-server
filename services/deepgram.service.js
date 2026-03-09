@@ -38,7 +38,7 @@ class DeepgramService {
             encoding: config.encoding || 'mulaw',  // 'alaw' for PCMA (codec 8), 'mulaw' for PCMU (codec 0)
             sample_rate: 8000,    // 8kHz for telephony
             channels: 1,
-            endpointing: 200,     // Detect utterance end after 200ms silence
+            endpointing: 400,     // Detect utterance end after 400ms silence (200ms was too aggressive for Hindi mid-sentence pauses)
             utterance_end_ms: 1000, // Fire UtteranceEnd event after 1000ms silence (Deepgram minimum is 1000)
             vad_events: true,     // Get speech start/end events
         };
