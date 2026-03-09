@@ -180,9 +180,20 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Wait 300ms for more transcript finals before processing (reduced from 1200ms)
+        // Wait 300ms for more transcript finals before processing
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
+
+            // Guard: if another getAIResponse just started during this 300ms wait, queue instead
+            if (this._isThinking) {
+                const t = this._pendingTranscript;
+                this._pendingTranscript = null;
+                if (t) {
+                    this._queuedTranscript = this._queuedTranscript ? `${t} ${this._queuedTranscript}` : t;
+                    console.log(`[Orchestrator] Timer fired but AI thinking — queued: ${t}`);
+                }
+                return;
+            }
 
             const fullTranscript = this._pendingTranscript;
             this._pendingTranscript = null;
@@ -196,14 +207,18 @@ class ConversationOrchestrator extends EventEmitter {
                 timestamp: new Date()
             });
 
-            // Add configured response delay
-            if (this.agentConfig.responseDelaySeconds) {
-                await this.delay(this.agentConfig.responseDelaySeconds * 1000);
-            }
-            console.log(`[⏱ LATENCY] Response delay done: +${this.agentConfig.responseDelaySeconds * 1000}ms`);
+            // Mark thinking EARLY — prevents a second timer from starting its own Gemini call
+            // during the response delay below
+            this._isThinking = true;
+
+            // Cap response delay to max 100ms regardless of agent DB config
+            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 100);
+            if (delayMs > 0) await this.delay(delayMs);
+            console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
 
             // Check again after delay - call may have ended during wait
             if (this._aborted) {
+                this._isThinking = false;
                 console.log('[Orchestrator] Call ended during response delay, aborting');
                 return;
             }
@@ -257,32 +272,31 @@ class ConversationOrchestrator extends EventEmitter {
             // but Gemini generation overlaps with TTS playback of earlier sentences
             let ttsChain = Promise.resolve();
 
-            // Enqueue a sentence for TTS
-            const enqueueSentence = (sentence) => {
-                sentence = sentence.trim();
-                if (!sentence || this._aborted) return;
+            // TTS merge buffer: accumulate short sentences to reduce API round-trips.
+            // Each ElevenLabs call has ~500ms TTFA overhead, so we merge sentences
+            // until we have ≥45 chars before firing TTS.
+            let ttsMergeBuf = '';
+            const MIN_TTS_CHARS = 45;
 
-                const cleanText = stripMarkdown(sentence);
-                if (!cleanText) return;
+            // Fire accumulated text as TTS
+            const _fireTTS = (text) => {
+                if (!text || this._aborted) return;
 
                 if (!ttsStarted) {
                     ttsStarted = true;
                     this.state = 'speaking';
-                    this.emit('speaking', cleanText);
+                    this.emit('speaking', text);
                     console.log(`[⏱ LATENCY] Gemini→TTS first sentence: ${Date.now() - t0}ms since getAIResponse start`);
                 }
 
                 const capturedIsFirst = isFirstSentence;
                 isFirstSentence = false;
 
-                console.log(`[Orchestrator] → TTS sentence: ${cleanText.substring(0, 70)}`);
+                console.log(`[Orchestrator] → TTS: ${text.substring(0, 80)}`);
 
                 ttsChain = ttsChain.then(async () => {
                     if (this._aborted) return;
 
-                    // Clear Deepgram buffer RIGHT BEFORE audio starts playing
-                    // (not during Gemini streaming) so the ignore window is active
-                    // during actual TTS playback, preventing echo transcripts
                     if (capturedIsFirst) {
                         this.deepgram.clearBuffer();
                     }
@@ -291,7 +305,7 @@ class ConversationOrchestrator extends EventEmitter {
                         const ttsStart = Date.now();
                         let firstChunk = true;
                         await this.elevenlabs.textToSpeechStream(
-                            cleanText,
+                            text,
                             this.agentConfig.voice,
                             (chunk) => {
                                 if (firstChunk) {
@@ -304,16 +318,32 @@ class ConversationOrchestrator extends EventEmitter {
                                 this.onAudioChunk(chunk);
                             }
                         );
-                        console.log(`[⏱ LATENCY] TTS sentence done: ${Date.now() - ttsStart}ms total`);
-                        // Flush carry buffer after each sentence
+                        console.log(`[⏱ LATENCY] TTS done: ${Date.now() - ttsStart}ms`);
                         if (!this._aborted) this.emit('audio_flush');
                     } catch (ttsError) {
-                        // Don't let one sentence failure kill the whole chain
                         if (!this._aborted) {
-                            console.error('[Orchestrator] TTS error for sentence:', ttsError.message);
+                            console.error('[Orchestrator] TTS error:', ttsError.message);
                         }
                     }
                 });
+            };
+
+            // Enqueue a sentence — merges short sentences to avoid excess TTS round-trips
+            const enqueueSentence = (sentence, force = false) => {
+                sentence = sentence.trim();
+                if (!sentence || this._aborted) return;
+
+                const cleanText = stripMarkdown(sentence);
+                if (!cleanText) return;
+
+                // Accumulate in merge buffer
+                ttsMergeBuf = ttsMergeBuf ? `${ttsMergeBuf} ${cleanText}` : cleanText;
+
+                // Fire TTS when: buffer is long enough, OR forced (end of stream)
+                if (force || ttsMergeBuf.length >= MIN_TTS_CHARS) {
+                    _fireTTS(ttsMergeBuf);
+                    ttsMergeBuf = '';
+                }
             };
 
             // Split sentenceBuffer at natural sentence boundaries.
@@ -353,8 +383,13 @@ class ConversationOrchestrator extends EventEmitter {
 
             // Flush any remaining text (last sentence that had no trailing whitespace)
             if (sentenceBuffer.trim()) {
-                enqueueSentence(sentenceBuffer);
+                enqueueSentence(sentenceBuffer, true); // force=true flushes merge buffer
                 sentenceBuffer = '';
+            }
+            // Flush any merge buffer that didn't reach MIN_TTS_CHARS (short final response)
+            if (ttsMergeBuf.trim()) {
+                _fireTTS(ttsMergeBuf);
+                ttsMergeBuf = '';
             }
 
             // If Gemini returned an empty response, handle gracefully
