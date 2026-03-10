@@ -1,8 +1,61 @@
-// Voice Routes - ElevenLabs voices & models API
+// Voice Routes - ElevenLabs voices & models API + Chatterbox voices
 
 const express = require('express');
 const router = express.Router();
 const ElevenLabsService = require('../services/elevenlabs.service');
+const ChatterboxService = require('../services/chatterbox.service');
+
+/**
+ * GET /vapi/voices/chatterbox
+ * List voices from the local Chatterbox server
+ */
+router.get('/chatterbox', async (req, res) => {
+    try {
+        const baseUrl = process.env.CHATTERBOX_BASE_URL || 'http://localhost:4123';
+        const service = new ChatterboxService(baseUrl);
+        const voices = await service.getVoices();
+
+        res.json({
+            success: true,
+            voices,
+            count: voices.length,
+            serverUrl: baseUrl
+        });
+    } catch (error) {
+        console.error('[Voices/Chatterbox] Error fetching voices:', error.message);
+        res.status(500).json({
+            error: 'Failed to fetch Chatterbox voices',
+            message: error.message,
+            hint: 'Make sure CHATTERBOX_BASE_URL is set and the Chatterbox server is running'
+        });
+    }
+});
+
+/**
+ * GET /vapi/voices/chatterbox/health
+ * Health check for the Chatterbox TTS server
+ */
+router.get('/chatterbox/health', async (req, res) => {
+    try {
+        const baseUrl = process.env.CHATTERBOX_BASE_URL || 'http://localhost:4123';
+        const service = new ChatterboxService(baseUrl);
+        const health = await service.healthCheck();
+
+        res.json({
+            success: health.ok,
+            status: health.status,
+            serverUrl: baseUrl,
+            data: health.data || null,
+            error: health.error || null
+        });
+    } catch (error) {
+        res.json({
+            success: false,
+            status: 'unreachable',
+            error: error.message
+        });
+    }
+});
 
 /**
  * GET /vapi/voices

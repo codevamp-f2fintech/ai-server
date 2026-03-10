@@ -4,6 +4,7 @@
 const DeepgramService = require('./deepgram.service');
 const GeminiService = require('./gemini.service');
 const ElevenLabsService = require('./elevenlabs.service');
+const ChatterboxService = require('./chatterbox.service');
 const EventEmitter = require('events');
 
 /**
@@ -58,7 +59,20 @@ class ConversationOrchestrator extends EventEmitter {
         // Initialize services
         this.deepgram = new DeepgramService(apiKeys.deepgram);
         this.gemini = new GeminiService(apiKeys.gemini);
-        this.elevenlabs = new ElevenLabsService(apiKeys.elevenlabs);
+
+        // Select TTS provider based on agent voice config
+        const voiceProvider = (this.agentConfig.voice?.provider || '11labs').toLowerCase();
+        if (voiceProvider === 'chatterbox') {
+            const chatterboxUrl = process.env.CHATTERBOX_BASE_URL || 'http://localhost:4123';
+            const chatterboxKey = process.env.CHATTERBOX_API_KEY || null;
+            console.log(`[Orchestrator] TTS provider: Chatterbox @ ${chatterboxUrl} (auth: ${chatterboxKey ? 'yes' : 'no'})`);
+            this.tts = new ChatterboxService(chatterboxUrl, chatterboxKey);
+        } else {
+            console.log(`[Orchestrator] TTS provider: ElevenLabs`);
+            this.tts = new ElevenLabsService(apiKeys.elevenlabs);
+        }
+        // Backward-compat alias — some callers still reference this.elevenlabs directly
+        this.elevenlabs = this.tts;
 
         // Timers
         this.silenceTimer = null;
@@ -148,8 +162,8 @@ class ConversationOrchestrator extends EventEmitter {
         console.log(`[Orchestrator] User said: ${transcript}`);
 
         // Stop current TTS generation to avoid overlapping if the user interrupts
-        if (this.elevenlabs) {
-            this.elevenlabs.stop();
+        if (this.tts) {
+            this.tts.stop();
         }
 
         this.emit('user_speech', transcript);
@@ -304,13 +318,14 @@ class ConversationOrchestrator extends EventEmitter {
                     try {
                         const ttsStart = Date.now();
                         let firstChunk = true;
-                        await this.elevenlabs.textToSpeechStream(
+                        const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
+                        await this.tts.textToSpeechStream(
                             text,
                             this.agentConfig.voice,
                             (chunk) => {
                                 if (firstChunk) {
                                     firstChunk = false;
-                                    console.log(`[⏱ LATENCY] TTS first audio byte: ${Date.now() - ttsStart}ms (ElevenLabs TTFA)`);
+                                    console.log(`[⏱ LATENCY] TTS first audio byte: ${Date.now() - ttsStart}ms (${providerLabel} TTFA)`);
                                     if (this._transcriptReceivedAt) {
                                         console.log(`[⏱ LATENCY] *** TOTAL E2E (transcript→first audio): ${Date.now() - this._transcriptReceivedAt}ms ***`);
                                     }
@@ -482,7 +497,7 @@ class ConversationOrchestrator extends EventEmitter {
         console.log(`[Orchestrator] Speaking: ${cleanText}`);
 
         try {
-            await this.elevenlabs.textToSpeechStream(
+            await this.tts.textToSpeechStream(
                 cleanText,
                 this.agentConfig.voice,
                 (audioChunk) => this.onAudioChunk(audioChunk)
@@ -595,8 +610,8 @@ class ConversationOrchestrator extends EventEmitter {
         if (this.deepgram) {
             this.deepgram.close();
         }
-        if (this.elevenlabs) {
-            this.elevenlabs.stop();
+        if (this.tts) {
+            this.tts.stop();
         }
 
         // Calculate stats
