@@ -4,29 +4,48 @@ const express = require('express');
 const router = express.Router();
 const ElevenLabsService = require('../services/elevenlabs.service');
 const ChatterboxService = require('../services/chatterbox.service');
+const db = require('../db');
 
 /**
  * GET /vapi/voices/chatterbox
- * List voices from the local Chatterbox server
+ * Fetch system and custom voices from resonanx-ai database
  */
 router.get('/chatterbox', async (req, res) => {
     try {
-        const baseUrl = process.env.CHATTERBOX_BASE_URL || 'http://localhost:4123';
-        const service = new ChatterboxService(baseUrl);
-        const voices = await service.getVoices();
+        if (!process.env.RESONANX_DATABASE_URL) {
+            return res.json({ success: true, voices: [], count: 0, serverUrl: process.env.CHATTERBOX_BASE_URL });
+        }
+
+        // We fetch voices from resonanx-ai db
+        // voice.voice is what is sent to Chatterbox TTS as voice_key. Resonanx stores audio in R2 as:
+        // voices/system/<id>.wav or voices/custom/<id>.wav
+        const result = await db.query('SELECT * FROM "Voice" ORDER BY name ASC');
+        const dbVoices = result.rows;
+
+        const voices = dbVoices.map(v => {
+            const path = v.variant === 'SYSTEM' ? `voices/system/${v.id}.wav` : `voices/custom/${v.id}.wav`;
+            return {
+                voiceId: v.r2ObjectKey || path, // If r2ObjectKey is filled, use it, else fallback
+                name: v.name,
+                language: v.language,
+                category: v.category,
+                variant: v.variant, // SYSTEM | CUSTOM
+                provider: 'chatterbox'
+            };
+        });
 
         res.json({
             success: true,
             voices,
             count: voices.length,
-            serverUrl: baseUrl
+            serverUrl: process.env.CHATTERBOX_BASE_URL || ''
         });
     } catch (error) {
-        console.error('[Voices/Chatterbox] Error fetching voices:', error.message);
+        console.error('[Voices/Chatterbox] Error fetching voices from DB:', error.message);
         res.status(500).json({
             error: 'Failed to fetch Chatterbox voices',
             message: error.message,
-            hint: 'Make sure CHATTERBOX_BASE_URL is set and the Chatterbox server is running'
+            hint: 'Ensure RESONANX_DATABASE_URL is set'
         });
     }
 });
@@ -37,8 +56,11 @@ router.get('/chatterbox', async (req, res) => {
  */
 router.get('/chatterbox/health', async (req, res) => {
     try {
-        const baseUrl = process.env.CHATTERBOX_BASE_URL || 'http://localhost:4123';
-        const service = new ChatterboxService(baseUrl);
+        const baseUrl = process.env.CHATTERBOX_BASE_URL;
+        const apiKey = process.env.CHATTERBOX_API_KEY;
+        if (!baseUrl) return res.json({ success: false, status: 'Not configured' });
+
+        const service = new ChatterboxService(baseUrl, apiKey);
         const health = await service.healthCheck();
 
         res.json({

@@ -15,6 +15,7 @@
     "mongoose": "^8.11.1",
     "multer": "^2.0.2",
     "pdf-parse": "^2.4.5",
+    "pg": "^8.20.0",
     "sdp-transform": "^3.0.0",
     "sip": "^0.0.6",
     "twilio": "^5.4.0",
