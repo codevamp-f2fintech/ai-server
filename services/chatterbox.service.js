@@ -26,6 +26,7 @@ class ChatterboxService {
         this._stopped = false;
         this._currentReq = null;
         this.textBuffer = '';
+        this._leftoverBuf = Buffer.alloc(0); // carry-over bytes between stream chunks
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -88,22 +89,39 @@ class ChatterboxService {
 
     _processPcmChunk(pcmBuf, wavInfo, onAudioChunk) {
         if (!onAudioChunk || pcmBuf.length === 0) return;
+
+        // Prepend any leftover bytes from the previous chunk so we never split a sample
+        if (this._leftoverBuf && this._leftoverBuf.length > 0) {
+            pcmBuf = Buffer.concat([this._leftoverBuf, pcmBuf]);
+            this._leftoverBuf = Buffer.alloc(0);
+        }
+
         try {
             let int16Samples;
             if (wavInfo.bitsPerSample === 32) {
                 // 32-bit IEEE float (torchaudio default) → convert to Int16 first
-                const frameLen = pcmBuf.length - (pcmBuf.length % 4);
-                if (frameLen === 0) return;
-                // Need aligned buffer for Float32Array
-                const alignedBuf = Buffer.allocUnsafe(frameLen);
-                pcmBuf.copy(alignedBuf, 0, 0, frameLen);
-                const float32 = new Float32Array(alignedBuf.buffer, alignedBuf.byteOffset, frameLen / 4);
+                // Each float32 sample is exactly 4 bytes — align to 4-byte boundary
+                const remainder = pcmBuf.length % 4;
+                if (remainder !== 0) {
+                    // Save trailing 1-3 bytes for next chunk
+                    this._leftoverBuf = pcmBuf.slice(pcmBuf.length - remainder);
+                    pcmBuf = pcmBuf.slice(0, pcmBuf.length - remainder);
+                }
+                if (pcmBuf.length === 0) return;
+                // Copy into a fresh buffer to guarantee 4-byte alignment for Float32Array
+                const alignedBuf = Buffer.allocUnsafe(pcmBuf.length);
+                pcmBuf.copy(alignedBuf);
+                const float32 = new Float32Array(alignedBuf.buffer, 0, alignedBuf.length / 4);
                 int16Samples = this._float32ToInt16(float32);
             } else {
-                // 16-bit PCM (standard)
-                const evenLen = pcmBuf.length - (pcmBuf.length % 2);
-                if (evenLen === 0) return;
-                int16Samples = new Int16Array(pcmBuf.buffer, pcmBuf.byteOffset, evenLen / 2);
+                // 16-bit PCM (standard) — align to 2-byte boundary
+                const remainder = pcmBuf.length % 2;
+                if (remainder !== 0) {
+                    this._leftoverBuf = pcmBuf.slice(pcmBuf.length - 1);
+                    pcmBuf = pcmBuf.slice(0, pcmBuf.length - 1);
+                }
+                if (pcmBuf.length === 0) return;
+                int16Samples = new Int16Array(pcmBuf.buffer, pcmBuf.byteOffset, pcmBuf.length / 2);
             }
             const ulawBuf = this._pcm16ToUlaw8000(int16Samples, wavInfo.sampleRate, wavInfo.numChannels);
             onAudioChunk(ulawBuf);
@@ -185,6 +203,7 @@ class ChatterboxService {
      */
     async textToSpeechStream(text, config, onAudioChunk) {
         this._stopped = false;
+        this._leftoverBuf = Buffer.alloc(0); // reset carry-over at start of each TTS request
         config = config || {};
 
         // voice field holds the R2 object key (e.g. "voices/system/<id>.wav")
