@@ -73,13 +73,39 @@ class ChatterboxService {
         return Buffer.from(alawmulaw.mulaw.encode(resampled));
     }
 
+    /**
+     * Convert Float32 PCM samples → Int16 (clamp to [-32768, 32767]).
+     * Chatterbox / torchaudio.save() outputs 32-bit IEEE float WAV by default.
+     */
+    _float32ToInt16(float32Samples) {
+        const out = new Int16Array(float32Samples.length);
+        for (let i = 0; i < float32Samples.length; i++) {
+            const s = Math.max(-1, Math.min(1, float32Samples[i]));
+            out[i] = s < 0 ? Math.round(s * 32768) : Math.round(s * 32767);
+        }
+        return out;
+    }
+
     _processPcmChunk(pcmBuf, wavInfo, onAudioChunk) {
         if (!onAudioChunk || pcmBuf.length === 0) return;
-        const evenLen = pcmBuf.length - (pcmBuf.length % 2);
-        if (evenLen === 0) return;
         try {
-            const int16 = new Int16Array(pcmBuf.buffer, pcmBuf.byteOffset, evenLen / 2);
-            const ulawBuf = this._pcm16ToUlaw8000(int16, wavInfo.sampleRate, wavInfo.numChannels);
+            let int16Samples;
+            if (wavInfo.bitsPerSample === 32) {
+                // 32-bit IEEE float (torchaudio default) → convert to Int16 first
+                const frameLen = pcmBuf.length - (pcmBuf.length % 4);
+                if (frameLen === 0) return;
+                // Need aligned buffer for Float32Array
+                const alignedBuf = Buffer.allocUnsafe(frameLen);
+                pcmBuf.copy(alignedBuf, 0, 0, frameLen);
+                const float32 = new Float32Array(alignedBuf.buffer, alignedBuf.byteOffset, frameLen / 4);
+                int16Samples = this._float32ToInt16(float32);
+            } else {
+                // 16-bit PCM (standard)
+                const evenLen = pcmBuf.length - (pcmBuf.length % 2);
+                if (evenLen === 0) return;
+                int16Samples = new Int16Array(pcmBuf.buffer, pcmBuf.byteOffset, evenLen / 2);
+            }
+            const ulawBuf = this._pcm16ToUlaw8000(int16Samples, wavInfo.sampleRate, wavInfo.numChannels);
             onAudioChunk(ulawBuf);
         } catch (err) {
             console.error('[Chatterbox] PCM→μ-law error:', err.message);
