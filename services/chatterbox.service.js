@@ -13,6 +13,7 @@
 const http = require('http');
 const https = require('https');
 const { spawn } = require('child_process');
+const ffmpegStatic = require('ffmpeg-static');
 const alawmulaw = require('alawmulaw');
 
 class ChatterboxService {
@@ -109,7 +110,7 @@ class ChatterboxService {
             // -ac 1      → mono
             // -acodec pcm_mulaw → μ-law encoding
             // -f mulaw   → raw output (no container)
-            const ffmpeg = spawn('ffmpeg', [
+            const ffmpeg = spawn(ffmpegStatic, [
                 '-loglevel', 'error',
                 '-i', 'pipe:0',       // read WAV from stdin
                 '-ar', '8000',        // resample to 8kHz
