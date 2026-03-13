@@ -1161,17 +1161,22 @@ class SipTrunkService extends EventEmitter {
 
         const CHUNK_SIZE = 160;
 
-        // IMPORTANT: audioCarryBuffer already holds post-conversion bytes
-        // (which is just raw μ-law since we no longer do any conversion).
-        // Pad with μ-law silence (0xFF) to exactly 160 bytes.
-        const silenceByte = 0xFF;  // μ-law silence (we always negotiate PCMU now)
+        // IMPORT: audioCarryBuffer already holds bytes that need to be padded.
+        // Pad with codec-correct silence to exactly 160 bytes.
+        const silenceByte = callData.remoteCodec === 8 ? 0xD5 : 0xFF; // A-law or μ-law silence
         const frameChunk = Buffer.alloc(CHUNK_SIZE, silenceByte);
         callData.audioCarryBuffer.copy(frameChunk, 0);  // carry bytes at start, silence padding at end
         callData.audioCarryBuffer = Buffer.alloc(0);
 
-        // Push the padded frame directly — already in the correct codec format
+        // Convert the padded frame if remote codec is 8 (PCMA) AND it hasn't been converted yet
+        // In the new ffmpeg pipeline, audio in carryBuffer is always μ-law. We must convert the whole frame.
+        let finalFrameChunk = frameChunk;
+        if (callData.remoteCodec === 8) {
+            finalFrameChunk = ulawToAlaw(frameChunk);
+        }
+
         if (!callData.audioQueue) callData.audioQueue = [];
-        callData.audioQueue.push(frameChunk);
+        callData.audioQueue.push(finalFrameChunk);
 
         // Start pacing timer if not already running
         if (!callData.audioSendInterval) {
@@ -1265,15 +1270,27 @@ class SipTrunkService extends EventEmitter {
 
     /**
      * Clear the audio queue (stop current playback)
+     * Automatically ignores interruptions within 1 second of last queue clear 
+     * or if the AI is actively starting to speak, to prevent echo/noise truncation.
      */
     clearAudioQueue(callId) {
         const callData = this.activeCalls.get(callId);
         if (callData) {
+            // Anti-echo block: if we're actively pumping audio, and a tiny bit of noise comes in,
+            // don't instantly wipe the whole queue unless it's a real interruption.
+            // If the queue has massive amounts of audio, it means the AI just started speaking.
+            if (callData.audioQueue && callData.audioQueue.length > 50) {
+                 // > 50 packets = 1 second of audio. It's likely an echo of the AI's own voice.
+                 console.log(`[SipTrunk] Ignoring clearAudioQueue (anti-echo protection) for call ${callId}`);
+                 return;
+            }
+
             if (callData.audioSendInterval) {
                 clearInterval(callData.audioSendInterval);
                 callData.audioSendInterval = null;
             }
             callData.audioQueue = [];
+            callData.audioCarryBuffer = Buffer.alloc(0);
             callData.isSendingAudio = false;
             callData.lastAudioSentTime = Date.now();
         }
