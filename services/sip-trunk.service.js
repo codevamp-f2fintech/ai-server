@@ -1192,7 +1192,9 @@ class SipTrunkService extends EventEmitter {
                 const chunk = callData.audioQueue.shift();
                 const header = Buffer.alloc(12);
                 header.writeUInt8(0x80, 0);
-                header.writeUInt8(0x00, 1);  // PCMU (μ-law), codec 0
+                const isFirstPacket = !callData.lastAudioSentTime || (Date.now() - callData.lastAudioSentTime) > 200;
+                const payloadType = (callData.remoteCodec || 0x00) | (isFirstPacket ? 0x80 : 0x00);
+                header.writeUInt8(payloadType, 1);
                 header.writeUInt16BE(callData.rtpSequence++ & 0xFFFF, 2);
                 header.writeUInt32BE(callData.rtpTimestamp, 4);
                 header.writeUInt32BE(callData.ssrc, 8);

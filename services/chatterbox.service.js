@@ -45,7 +45,7 @@ class ChatterboxService {
         const url = new URL(path, this.baseUrl);
         const isHttps = url.protocol === 'https:';
         const lib = isHttps ? https : http;
-        const headers = this._buildHeaders({ 'Content-Length': Buffer.byteLength(body) });
+        const headers = this._buildHeaders();
 
         return new Promise((resolve, reject) => {
             const req = lib.request({
