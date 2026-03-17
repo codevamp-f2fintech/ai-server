@@ -332,18 +332,42 @@ class ConversationOrchestrator extends EventEmitter {
             // Fire accumulated text as TTS
             const _fireTTS = (text) => {
                 if (!text || this._aborted) return;
+                
+                // --- PREVENT DOUBLE SPEECH ---
+                // If Gemini's first sentence starts with the same filler word we just played,
+                // strip it out so we don't hear "Hmm... Hmm..." or "Okay... Okay...".
+                let cleanText = text;
+                if (isFirstSentence) {
+                    // Check if the text starts with the filler word (ignoring punctuation/case/filler punctuation)
+                    const cleanFiller = filler.replace(/[...]/g, '').trim().toLowerCase();
+                    const cleanGenText = text.trim().toLowerCase();
+                    
+                    if (cleanGenText.startsWith(cleanFiller)) {
+                        console.log(`[Orchestrator] Stripping duplicate filler word from Gemini text: "${cleanFiller}"`);
+                        // Use regex to strip it from the *original* text to preserve original casing/punctuation
+                        const regex = new RegExp('^\\s*\\b' + cleanFiller + '\\b[^\\w\\s]*\\s*', 'iu');
+                        cleanText = text.replace(regex, '');
+                        console.log(`[Orchestrator] Cleaned Gemini first sentence: "${cleanText}"`);
+                    }
+                }
+                
+                if (!cleanText.trim()) {
+                    // Start of response might have been *only* the filler word
+                    return;
+                }
+                // --- END PREVENT DOUBLE SPEECH ---
 
                 if (!ttsStarted) {
                     ttsStarted = true;
                     this.state = 'speaking';
-                    this.emit('speaking', text);
+                    this.emit('speaking', cleanText);
                     console.log(`[⏱ LATENCY] Gemini→TTS first sentence: ${Date.now() - t0}ms since getAIResponse start`);
                 }
 
                 const capturedIsFirst = isFirstSentence;
                 isFirstSentence = false;
 
-                console.log(`[Orchestrator] → TTS: ${text.substring(0, 80)}`);
+                console.log(`[Orchestrator] → TTS: ${cleanText.substring(0, 80)}`);
 
                 ttsChain = ttsChain.then(async () => {
                     if (this._aborted) return;
@@ -357,7 +381,7 @@ class ConversationOrchestrator extends EventEmitter {
                         let firstChunk = true;
                         const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
                         await this.tts.textToSpeechStream(
-                            text,
+                            cleanText,
                             this.agentConfig.voice,
                             (chunk) => {
                                 if (firstChunk) {
