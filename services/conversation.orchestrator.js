@@ -321,7 +321,7 @@ class ConversationOrchestrator extends EventEmitter {
                         let firstChunk = true;
                         const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
                         await this.tts.textToSpeechStream(
-                            cleanText,
+                            text,
                             this.agentConfig.voice,
                             (chunk) => {
                                 if (firstChunk) {
