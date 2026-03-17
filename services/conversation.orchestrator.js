@@ -27,18 +27,6 @@ function stripMarkdown(text) {
         .trim();
 }
 
-/**
- * Get localized filler word based on agent language structure
- */
-function getFillerWord(language) {
-    const fillers = {
-        'hi': 'हम्म...',
-        'en': 'Hmm...',
-    };
-    const langPrefix = (language || 'en').substring(0, 2).toLowerCase();
-    return fillers[langPrefix] || fillers['en'];
-}
-
 class ConversationOrchestrator extends EventEmitter {
     constructor(agentConfig, apiKeys) {
         super();
@@ -299,30 +287,6 @@ class ConversationOrchestrator extends EventEmitter {
             // but Gemini generation overlaps with TTS playback of earlier sentences
             let ttsChain = Promise.resolve();
 
-            // --- ADDITION: Play filler word immediately (Backchanneling) ---
-            const filler = getFillerWord(this.agentConfig.transcriber?.language);
-            console.log(`[Orchestrator] Backchanneling with filler: ${filler}`);
-            this.state = 'speaking';
-            this.emit('speaking', filler);
-
-            // Queue filler word first in TTS chain so it plays while Gemini thinks
-            ttsChain = ttsChain.then(async () => {
-                if (this._aborted) return;
-                try {
-                    const ttsStart = Date.now();
-                    const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
-                    await this.tts.textToSpeechStream(
-                        filler,
-                        this.agentConfig.voice,
-                        (chunk) => this.onAudioChunk(chunk)
-                    );
-                    console.log(`[⏱ LATENCY] Filler TTS done: ${Date.now() - ttsStart}ms (${providerLabel})`);
-                } catch (e) {
-                    console.error('[Orchestrator] Filler TTS error:', e.message);
-                }
-            });
-            // --- END ADDITION ---
-
             // TTS merge buffer: accumulate short sentences to reduce API round-trips.
             // Each ElevenLabs call has ~500ms TTFA overhead, so we merge sentences
             // until we have ≥45 chars before firing TTS.
@@ -332,42 +296,18 @@ class ConversationOrchestrator extends EventEmitter {
             // Fire accumulated text as TTS
             const _fireTTS = (text) => {
                 if (!text || this._aborted) return;
-                
-                // --- PREVENT DOUBLE SPEECH ---
-                // If Gemini's first sentence starts with the same filler word we just played,
-                // strip it out so we don't hear "Hmm... Hmm..." or "Okay... Okay...".
-                let cleanText = text;
-                if (isFirstSentence) {
-                    // Check if the text starts with the filler word (ignoring punctuation/case/filler punctuation)
-                    const cleanFiller = filler.replace(/[...]/g, '').trim().toLowerCase();
-                    const cleanGenText = text.trim().toLowerCase();
-                    
-                    if (cleanGenText.startsWith(cleanFiller)) {
-                        console.log(`[Orchestrator] Stripping duplicate filler word from Gemini text: "${cleanFiller}"`);
-                        // Use regex to strip it from the *original* text to preserve original casing/punctuation
-                        const regex = new RegExp('^\\s*\\b' + cleanFiller + '\\b[^\\w\\s]*\\s*', 'iu');
-                        cleanText = text.replace(regex, '');
-                        console.log(`[Orchestrator] Cleaned Gemini first sentence: "${cleanText}"`);
-                    }
-                }
-                
-                if (!cleanText.trim()) {
-                    // Start of response might have been *only* the filler word
-                    return;
-                }
-                // --- END PREVENT DOUBLE SPEECH ---
 
                 if (!ttsStarted) {
                     ttsStarted = true;
                     this.state = 'speaking';
-                    this.emit('speaking', cleanText);
+                    this.emit('speaking', text);
                     console.log(`[⏱ LATENCY] Gemini→TTS first sentence: ${Date.now() - t0}ms since getAIResponse start`);
                 }
 
                 const capturedIsFirst = isFirstSentence;
                 isFirstSentence = false;
 
-                console.log(`[Orchestrator] → TTS: ${cleanText.substring(0, 80)}`);
+                console.log(`[Orchestrator] → TTS: ${text.substring(0, 80)}`);
 
                 ttsChain = ttsChain.then(async () => {
                     if (this._aborted) return;
