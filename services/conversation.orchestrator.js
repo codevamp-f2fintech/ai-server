@@ -27,6 +27,19 @@ function stripMarkdown(text) {
         .trim();
 }
 
+/**
+ * Get localized filler word based on agent language structure
+ */
+function getFillerWord(language) {
+    const fillers = {
+        'hi': ['हम्म...', 'ठीक है...'],
+        'en': ['Hmm...', 'Okay...'],
+    };
+    const langPrefix = (language || 'en').substring(0, 2).toLowerCase();
+    const options = fillers[langPrefix] || fillers['en'];
+    return options[Math.floor(Math.random() * options.length)];
+}
+
 class ConversationOrchestrator extends EventEmitter {
     constructor(agentConfig, apiKeys) {
         super();
@@ -194,7 +207,7 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Wait 300ms for more transcript finals before processing
+        // Wait 800ms for more transcript finals before processing
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -225,8 +238,8 @@ class ConversationOrchestrator extends EventEmitter {
             // during the response delay below
             this._isThinking = true;
 
-            // Cap response delay to max 100ms regardless of agent DB config
-            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 100);
+            // Apply configured response delay (cap at 3s to be safe)
+            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 3000);
             if (delayMs > 0) await this.delay(delayMs);
             console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
 
@@ -285,6 +298,30 @@ class ConversationOrchestrator extends EventEmitter {
             // Sequential chain of TTS promises — sentences play in order
             // but Gemini generation overlaps with TTS playback of earlier sentences
             let ttsChain = Promise.resolve();
+
+            // --- ADDITION: Play filler word immediately (Backchanneling) ---
+            const filler = getFillerWord(this.agentConfig.transcriber?.language);
+            console.log(`[Orchestrator] Backchanneling with filler: ${filler}`);
+            this.state = 'speaking';
+            this.emit('speaking', filler);
+
+            // Queue filler word first in TTS chain so it plays while Gemini thinks
+            ttsChain = ttsChain.then(async () => {
+                if (this._aborted) return;
+                try {
+                    const ttsStart = Date.now();
+                    const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
+                    await this.tts.textToSpeechStream(
+                        filler,
+                        this.agentConfig.voice,
+                        (chunk) => this.onAudioChunk(chunk)
+                    );
+                    console.log(`[⏱ LATENCY] Filler TTS done: ${Date.now() - ttsStart}ms (${providerLabel})`);
+                } catch (e) {
+                    console.error('[Orchestrator] Filler TTS error:', e.message);
+                }
+            });
+            // --- END ADDITION ---
 
             // TTS merge buffer: accumulate short sentences to reduce API round-trips.
             // Each ElevenLabs call has ~500ms TTFA overhead, so we merge sentences

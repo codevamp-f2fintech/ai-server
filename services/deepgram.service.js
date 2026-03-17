@@ -15,7 +15,7 @@ class DeepgramService {
         // Utterance assembly: track interims and use fallback if no final arrives
         this._lastInterimTranscript = '';
         this._interimTimer = null;
-        this._INTERIM_FALLBACK_MS = 800; // Use interim as final after 0.8s of no new events (reduced from 1500ms)
+        this._INTERIM_FALLBACK_MS = 1500; // Use interim as final after 1.5s of no new events
     }
 
     /**
@@ -38,8 +38,8 @@ class DeepgramService {
             encoding: config.encoding || 'mulaw',  // 'alaw' for PCMA (codec 8), 'mulaw' for PCMU (codec 0)
             sample_rate: 8000,    // 8kHz for telephony
             channels: 1,
-            endpointing: 400,     // Detect utterance end after 400ms silence (200ms was too aggressive for Hindi mid-sentence pauses)
-            utterance_end_ms: 1000, // Fire UtteranceEnd event after 1000ms silence (Deepgram minimum is 1000)
+            endpointing: 800,     // Detect utterance end after 800ms silence (increased to avoid cutting off mid-sentence)
+            utterance_end_ms: 1500, // Fire UtteranceEnd event after 1500ms silence
             vad_events: true,     // Get speech start/end events
         };
 
