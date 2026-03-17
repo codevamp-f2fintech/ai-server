@@ -16,6 +16,11 @@ class DeepgramService {
         this._lastInterimTranscript = '';
         this._interimTimer = null;
         this._INTERIM_FALLBACK_MS = 1500; // Use interim as final after 1.5s of no new events
+
+        // Final accumulator: collect is_final fragments until speech_final or UtteranceEnd
+        this._finalAccumulator = '';
+        this._finalFallbackTimer = null;
+        this._FINAL_FALLBACK_MS = 2000; // Deliver accumulated finals if no speech_final within 2s
     }
 
     /**
@@ -75,17 +80,41 @@ class DeepgramService {
                     return;
                 }
 
-                if (isFinal && onTranscript) {
-                    // Got a real final transcript - use it immediately
+                if (isFinal) {
+                    // --- KEY FIX ---
+                    // Accumulate ALL is_final fragments — Deepgram sends is_final on
+                    // every endpointing-silence even mid-sentence. Only speech_final
+                    // means the utterance is truly complete.
+                    this._finalAccumulator = this._finalAccumulator
+                        ? `${this._finalAccumulator} ${transcript}`
+                        : transcript;
+
+                    // Clear interim fallback — finals are more reliable
                     this._clearInterimTimer();
                     this._lastInterimTranscript = '';
-                    console.log(`[Deepgram] Using final transcript: ${transcript}`);
-                    onTranscript(transcript);
-                } else if (!isFinal) {
-                    // Interim result - accumulate and start fallback timer
+
+                    console.log(`[Deepgram] Accumulated finals so far: "${this._finalAccumulator}"`);
+
+                    if (speechFinal) {
+                        // User truly done speaking — deliver the full accumulated utterance
+                        const fullUtterance = this._finalAccumulator;
+                        this._finalAccumulator = '';
+                        this._clearFinalFallbackTimer();
+                        console.log(`[Deepgram] speech_final => delivering full utterance: "${fullUtterance}"`);
+                        if (onTranscript) onTranscript(fullUtterance);
+                    } else {
+                        // is_final but NOT speech_final — user may still be talking.
+                        // Start/reset a fallback timer in case speech_final never comes.
+                        this._startFinalFallbackTimer(onTranscript);
+                    }
+                } else {
+                    // Interim result — track for UtteranceEnd fallback
                     this._lastInterimTranscript = transcript;
                     if (onInterim) onInterim(transcript);
-                    this._startInterimFallbackTimer(onTranscript);
+                    // Only start interim fallback if we have no accumulated finals yet
+                    if (!this._finalAccumulator) {
+                        this._startInterimFallbackTimer(onTranscript);
+                    }
                 }
             } else {
                 // Empty transcript events
@@ -98,11 +127,22 @@ class DeepgramService {
         // Handle UtteranceEnd event - fires when Deepgram detects end of speech
         this.connection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
             console.log('[Deepgram] UtteranceEnd event received');
-            if (this._lastInterimTranscript && !this._ignoreTranscripts) {
-                console.log(`[Deepgram] Using interim transcript on UtteranceEnd: ${this._lastInterimTranscript}`);
+            if (this._ignoreTranscripts) return;
+
+            // If we have accumulated finals waiting, deliver them now
+            if (this._finalAccumulator) {
+                const fullUtterance = this._finalAccumulator;
+                this._finalAccumulator = '';
+                this._clearFinalFallbackTimer();
+                this._clearInterimTimer();
+                console.log(`[Deepgram] UtteranceEnd => delivering accumulated finals: "${fullUtterance}"`);
+                if (onTranscript) onTranscript(fullUtterance);
+            } else if (this._lastInterimTranscript) {
+                // Fallback: no finals yet, use the last interim
                 this._clearInterimTimer();
                 const pendingTranscript = this._lastInterimTranscript;
                 this._lastInterimTranscript = '';
+                console.log(`[Deepgram] UtteranceEnd => using interim fallback: "${pendingTranscript}"`);
                 if (onTranscript) onTranscript(pendingTranscript);
             }
         });
@@ -126,6 +166,32 @@ class DeepgramService {
         });
 
         return this.connection;
+    }
+
+    /**
+     * Start a fallback timer for accumulated is_final (non-speech_final) transcripts.
+     * If speech_final never arrives within _FINAL_FALLBACK_MS, deliver the accumulated text.
+     */
+    _startFinalFallbackTimer(onTranscript) {
+        this._clearFinalFallbackTimer();
+        this._finalFallbackTimer = setTimeout(() => {
+            if (this._finalAccumulator && !this._ignoreTranscripts) {
+                const fullUtterance = this._finalAccumulator;
+                this._finalAccumulator = '';
+                console.log(`[Deepgram] Final fallback timer fired, delivering: "${fullUtterance}"`);
+                if (onTranscript) onTranscript(fullUtterance);
+            }
+        }, this._FINAL_FALLBACK_MS);
+    }
+
+    /**
+     * Clear the final fallback timer
+     */
+    _clearFinalFallbackTimer() {
+        if (this._finalFallbackTimer) {
+            clearTimeout(this._finalFallbackTimer);
+            this._finalFallbackTimer = null;
+        }
     }
 
     /**
@@ -191,9 +257,11 @@ class DeepgramService {
     clearBuffer() {
         // Flag to ignore incoming transcripts temporarily
         this._ignoreTranscripts = true;
-        // Clear any pending interim transcript
+        // Clear any pending interim transcript and accumulated finals
         this._lastInterimTranscript = '';
+        this._finalAccumulator = '';
         this._clearInterimTimer();
+        this._clearFinalFallbackTimer();
         console.log('[Deepgram] Buffer clearing - ignoring transcripts');
 
         // Reset after a short delay to allow pending transcripts to be discarded
@@ -215,7 +283,9 @@ class DeepgramService {
      */
     close() {
         this._clearInterimTimer();
+        this._clearFinalFallbackTimer();
         this._lastInterimTranscript = '';
+        this._finalAccumulator = '';
         if (this.connection) {
             this.connection.finish();
             this.connection = null;
