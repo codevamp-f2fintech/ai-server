@@ -32,12 +32,11 @@ function stripMarkdown(text) {
  */
 function getFillerWord(language) {
     const fillers = {
-        'hi': ['हम्म...', 'ठीक है...'],
-        'en': ['Hmm...', 'Okay...'],
+        'hi': 'हम्म...',
+        'en': 'Hmm...',
     };
     const langPrefix = (language || 'en').substring(0, 2).toLowerCase();
-    const options = fillers[langPrefix] || fillers['en'];
-    return options[Math.floor(Math.random() * options.length)];
+    return fillers[langPrefix] || fillers['en'];
 }
 
 class ConversationOrchestrator extends EventEmitter {
@@ -208,6 +207,7 @@ class ConversationOrchestrator extends EventEmitter {
         }
 
         // Wait 800ms for more transcript finals before processing
+        // NOTE: This value MUST match the comment - previously was accidentally left at 300ms
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -265,7 +265,7 @@ class ConversationOrchestrator extends EventEmitter {
                 });
                 await this.getAIResponse(queued);
             }
-        }, 300);
+        }, 800);
     }
 
     /**
