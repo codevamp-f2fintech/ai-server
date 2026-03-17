@@ -408,12 +408,23 @@ class ConversationOrchestrator extends EventEmitter {
                 ttsMergeBuf = '';
             }
 
-            // If Gemini returned an empty response, handle gracefully
+            // If Gemini returned an empty response, retry once with a nudge
             if (!ttsStarted) {
-                console.warn('[Orchestrator] Gemini returned empty response');
-                this.emit('audio_flush');
-                this.state = 'listening';
-                this.startSilenceTimer();
+                console.warn('[Orchestrator] Gemini returned empty response — retrying with nudge...');
+                // Don't fall silent — ask Gemini to continue naturally.
+                // Use the same language as the agent's configured transcriber language.
+                const lang = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
+                const nudge = lang === 'hi'
+                    ? '[SYSTEM] User ne kuch kaha lekin response generate nahi hua. Conversation naturally continue karo.'
+                    : '[SYSTEM] The user said something but no response was generated. Continue the conversation naturally.';
+                try {
+                    await this.getAIResponse(nudge);
+                } catch (e) {
+                    console.error('[Orchestrator] Nudge retry failed:', e.message);
+                    this.emit('audio_flush');
+                    this.state = 'listening';
+                    this.startSilenceTimer();
+                }
                 return;
             }
 
