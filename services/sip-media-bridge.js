@@ -187,6 +187,14 @@ class SipMediaBridge {
             if (!this.activeSessions.has(internalCallId)) return;
             sipService.flushCarryBuffer(sipCallId);
         });
+        // Listen for actual playback completion from the RTP stack
+        const playbackCompleteHandler = (completedCallId) => {
+            if (completedCallId === sipCallId && this.activeSessions.has(internalCallId)) {
+                orchestrator.emit('playback_complete');
+            }
+        };
+        sipService.on('playback_complete', playbackCompleteHandler);
+        session.playbackCompleteHandler = playbackCompleteHandler;
 
         console.log(`[SipMediaBridge] Outgoing audio handler set up for ${internalCallId}`);
     }
@@ -266,6 +274,9 @@ class SipMediaBridge {
             // 2. Remove audio_in listener
             if (session.audioInHandler) {
                 session.sipService.removeListener('audio_in', session.audioInHandler);
+            }
+            if (session.playbackCompleteHandler) {
+                session.sipService.removeListener('playback_complete', session.playbackCompleteHandler);
             }
 
             // 3. Stop recording and upload to S3

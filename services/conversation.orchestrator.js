@@ -444,15 +444,40 @@ class ConversationOrchestrator extends EventEmitter {
 
             this.emit('assistant_speech', fullResponse);
 
-            // Wait for ALL enqueued TTS sentences to finish playing
+            // Wait for ALL enqueued TTS sentences to finish generating
             await ttsChain;
 
             if (this._aborted) {
                 return;
             }
 
-            // Final flush and transition to listening
+            // Final flush to push carry buffer to RTP
             this.emit('audio_flush');
+
+            // Wait for actual audio playback to finish over SIP/RTP
+            await new Promise(resolve => {
+                let resolved = false;
+                const finish = () => {
+                    if (resolved) return;
+                    resolved = true;
+                    this.removeListener('playback_complete', onWaitEnd);
+                    this.removeListener('user_speech', onWaitEnd);
+                    clearTimeout(timeout);
+                    resolve();
+                };
+
+                const onWaitEnd = () => finish();
+                this.once('playback_complete', onWaitEnd);
+                this.once('user_speech', onWaitEnd);
+                
+                // Safety timeout
+                const timeout = setTimeout(() => finish(), 15000);
+            });
+
+            if (this._aborted) {
+                return;
+            }
+
             this.state = 'listening';
             const totalTurn = Date.now() - t0;
             console.log(`[⏱ LATENCY] All speaking done. Turn total: ${totalTurn}ms`);
@@ -518,6 +543,24 @@ class ConversationOrchestrator extends EventEmitter {
             // Signal that TTS is done so any carry-buffer remainder gets flushed to RTP
             if (!this._aborted) {
                 this.emit('audio_flush');
+            }
+
+            if (!this._aborted) {
+                await new Promise(resolve => {
+                    let resolved = false;
+                    const finish = () => {
+                        if (resolved) return;
+                        resolved = true;
+                        this.removeListener('playback_complete', onWaitEnd);
+                        this.removeListener('user_speech', onWaitEnd);
+                        clearTimeout(timeout);
+                        resolve();
+                    };
+                    const onWaitEnd = () => finish();
+                    this.once('playback_complete', onWaitEnd);
+                    this.once('user_speech', onWaitEnd);
+                    const timeout = setTimeout(() => finish(), 15000);
+                });
             }
 
             // CRITICAL: Only transition to listening if call is still alive

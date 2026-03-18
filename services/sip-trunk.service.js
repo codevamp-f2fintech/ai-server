@@ -1096,6 +1096,7 @@ class SipTrunkService extends EventEmitter {
                     callData.audioSendInterval = null;
                     callData.isSendingAudio = false;
                     callData.lastAudioSentTime = Date.now();
+                    this.emit('playback_complete', callId);
                     return;
                 }
 
@@ -1187,6 +1188,7 @@ class SipTrunkService extends EventEmitter {
                     callData.audioSendInterval = null;
                     callData.isSendingAudio = false;
                     callData.lastAudioSentTime = Date.now();
+                    this.emit('playback_complete', callId);
                     return;
                 }
                 const chunk = callData.audioQueue.shift();
@@ -1295,6 +1297,7 @@ class SipTrunkService extends EventEmitter {
             callData.audioCarryBuffer = Buffer.alloc(0);
             callData.isSendingAudio = false;
             callData.lastAudioSentTime = Date.now();
+            this.emit('playback_complete', callId);
         }
     }
 
