@@ -320,9 +320,10 @@ class ConversationOrchestrator extends EventEmitter {
                         const ttsStart = Date.now();
                         let firstChunk = true;
                         const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
+                        const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
                         await this.tts.textToSpeechStream(
                             text,
-                            this.agentConfig.voice,
+                            { ...this.agentConfig.voice, language: this.agentConfig.voice?.language || langCode },
                             (chunk) => {
                                 if (firstChunk) {
                                     firstChunk = false;
@@ -534,9 +535,10 @@ class ConversationOrchestrator extends EventEmitter {
         console.log(`[Orchestrator] Speaking: ${cleanText}`);
 
         try {
+            const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
             await this.tts.textToSpeechStream(
                 cleanText,
-                this.agentConfig.voice,
+                { ...this.agentConfig.voice, language: this.agentConfig.voice?.language || langCode },
                 (audioChunk) => this.onAudioChunk(audioChunk)
             );
 
