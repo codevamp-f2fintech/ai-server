@@ -191,7 +191,10 @@ class ChatterboxService {
             repetition_penalty: 1.2,
             norm_loudness: true,
         };
-        if (language) requestBody.language = language;
+        if (language) {
+            requestBody.language = language;
+            requestBody.language_id = language; // Modal Chatterbox expects language_id
+        }
 
         try {
             const res = await this._post('/generate', requestBody);
