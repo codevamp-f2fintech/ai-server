@@ -194,8 +194,7 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Wait 800ms for more transcript finals before processing
-        // NOTE: This value MUST match the comment - previously was accidentally left at 300ms
+        // Wait 500ms for more transcript finals before processing
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -253,7 +252,7 @@ class ConversationOrchestrator extends EventEmitter {
                 });
                 await this.getAIResponse(queued);
             }
-        }, 800);
+        }, 500);
     }
 
     /**
@@ -265,6 +264,7 @@ class ConversationOrchestrator extends EventEmitter {
     async getAIResponse(userMessage) {
         if (this._aborted) return;
 
+        this.clearSilenceTimer(); // Ensure we don't timeout while thinking or speaking
         this.state = 'thinking';
         this._isThinking = true;
         this.emit('thinking');
@@ -288,10 +288,10 @@ class ConversationOrchestrator extends EventEmitter {
             let ttsChain = Promise.resolve();
 
             // TTS merge buffer: accumulate short sentences to reduce API round-trips.
-            // Each ElevenLabs call has ~500ms TTFA overhead, so we merge sentences
-            // until we have ≥45 chars before firing TTS.
+            // Each ElevenLabs/Chatterbox call has ~500ms TTFA overhead, so we merge sentences
+            // until we have ≥20 chars before firing TTS.
             let ttsMergeBuf = '';
-            const MIN_TTS_CHARS = 45;
+            const MIN_TTS_CHARS = 20;
 
             // Fire accumulated text as TTS
             const _fireTTS = (text) => {
@@ -521,6 +521,8 @@ class ConversationOrchestrator extends EventEmitter {
             console.log('[Orchestrator] speak() skipped - call already ended');
             return;
         }
+
+        this.clearSilenceTimer(); // Pause timeout during speech
 
         // Strip Markdown formatting - asterisks, headers etc. create noise in TTS
         const cleanText = stripMarkdown(text);
