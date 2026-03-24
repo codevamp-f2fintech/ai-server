@@ -363,11 +363,16 @@ class ConversationOrchestrator extends EventEmitter {
                 }
             };
 
+            // For Chatterbox, we want ONE request per message to avoid gaps between sentences.
+            const isChatterbox = this.tts instanceof ChatterboxService;
+
             // Split sentenceBuffer at natural sentence boundaries.
             // Uses split-based approach: finds punctuation followed by whitespace.
             // The last sentence (no trailing whitespace) is held in sentenceBuffer
             // and flushed after Gemini finishes.
             const extractSentences = () => {
+                if (isChatterbox) return; // For Chatterbox, accumulate entire response
+
                 // Match punctuation + following whitespace (consume the whitespace as separator)
                 const parts = sentenceBuffer.split(/(?<=[.!?।])\s+/);
                 if (parts.length > 1) {
