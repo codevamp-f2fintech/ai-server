@@ -218,9 +218,10 @@ class SipMediaBridge {
 
         orchestrator.on('thinking', () => {
             console.log(`[SipMediaBridge] [${internalCallId}] AI thinking...`);
-            if (session.sipService && session.sipCallId) {
-                session.sipService.clearAudioQueue(session.sipCallId);
-            }
+            // NOTE: Do NOT clear the audio queue here.
+            // The `thinking` event always fires right after `user_speech`, which already
+            // cleared the queue. Clearing again here races with audio that is still being
+            // drained and causes the tail of the AI's previous response to be cut off.
         });
 
         orchestrator.on('speaking', (text) => {

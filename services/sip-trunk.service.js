@@ -1282,12 +1282,14 @@ class SipTrunkService extends EventEmitter {
         if (callData) {
             // Anti-echo block: if we're actively pumping audio, and a tiny bit of noise comes in,
             // don't instantly wipe the whole queue unless it's a real interruption.
-            // If the queue has massive amounts of audio, it means the AI just started speaking.
-            if (callData.audioQueue && callData.audioQueue.length > 50) {
-                 // > 50 packets = 1 second of audio. It's likely an echo of the AI's own voice.
-                 console.log(`[SipTrunk] Ignoring clearAudioQueue (anti-echo protection) for call ${callId}`);
+            // Raised from 50 → 150: Chatterbox delivers audio in ONE large burst, so a long
+            // Hindi sentence can fill 200+ packets instantly. 50 packets (1s) was too low.
+            if (callData.audioQueue && callData.audioQueue.length > 150) {
+                 // > 150 packets = ~3 seconds of audio. Almost certainly an echo of the AI's own voice.
+                 console.log(`[SipTrunk] Ignoring clearAudioQueue (anti-echo protection, ${callData.audioQueue.length} packets remain) for call ${callId}`);
                  return;
             }
+
 
             if (callData.audioSendInterval) {
                 clearInterval(callData.audioSendInterval);
