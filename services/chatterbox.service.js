@@ -183,10 +183,11 @@ class ChatterboxService {
         console.log(`[Chatterbox] TTS: "${text.substring(0, 60)}..." voice_key="${voiceKey}"`);
 
         // Sanitize text for Chatterbox Hindi to prevent the "repetition loop / forced EOS" bug
-        // that causes the AI voice to drop silently after commas or colons.
+        // that causes the AI voice to drop silently after punctuation (commas, colons, !, ?).
+        // Since we send full sentences to Modal, any strong punctuation can crash the alignment analyzer.
         let sanitizedText = text;
         if (language && language.startsWith('hi')) {
-            sanitizedText = sanitizedText.replace(/[,;:]/g, ' ');
+            sanitizedText = sanitizedText.replace(/[,;:!?।|.\n]/g, ' ');
         }
 
         const requestBody = {
