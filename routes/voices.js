@@ -80,6 +80,68 @@ router.get('/chatterbox/health', async (req, res) => {
 });
 
 /**
+ * POST /vapi/voices/chatterbox/warmup
+ * Warm up the Chatterbox Modal model by sending a lightweight TTS request.
+ * Modal serverless containers go cold — this pre-warms them before a live call.
+ */
+router.post('/chatterbox/warmup', async (req, res) => {
+    try {
+        const baseUrl = process.env.CHATTERBOX_BASE_URL;
+        const apiKey = process.env.CHATTERBOX_API_KEY;
+        if (!baseUrl) {
+            return res.status(400).json({ success: false, error: 'CHATTERBOX_BASE_URL not configured' });
+        }
+
+        const service = new ChatterboxService(baseUrl, apiKey);
+        const t0 = Date.now();
+
+        console.log('[Voices/Warmup] Sending warm-up request to Chatterbox Modal...');
+
+        // Send a minimal TTS request — just enough to boot the container.
+        // We discard the audio; we only care about the round-trip time.
+        const warmupText = 'Hello.';
+        const warmupVoice = req.body?.voice_key || 'voices/system/default.wav';
+
+        // Wrap in a timeout — Modal cold-starts can take up to 60s
+        const TIMEOUT_MS = 90_000;
+        let timedOut = false;
+        const timeoutHandle = setTimeout(() => { timedOut = true; }, TIMEOUT_MS);
+
+        try {
+            await service.textToSpeechBuffer(warmupText, {
+                voice: warmupVoice,
+                temperature: 0.5,
+            });
+        } finally {
+            clearTimeout(timeoutHandle);
+        }
+
+        if (timedOut) {
+            return res.status(504).json({
+                success: false,
+                error: 'Warm-up timed out after 90 seconds. Modal container may still be starting up.',
+            });
+        }
+
+        const responseTimeMs = Date.now() - t0;
+        console.log(`[Voices/Warmup] Modal warmed up in ${responseTimeMs}ms`);
+
+        res.json({
+            success: true,
+            warmedUp: true,
+            responseTimeMs,
+            message: `Modal is warm (${responseTimeMs}ms)`,
+        });
+    } catch (error) {
+        console.error('[Voices/Warmup] Error warming up Chatterbox:', error.message);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to warm up Modal',
+        });
+    }
+});
+
+/**
  * GET /vapi/voices
  * Get all available voices from ElevenLabs (user's added voices + defaults)
  */
