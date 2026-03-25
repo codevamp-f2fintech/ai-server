@@ -15,12 +15,12 @@ class DeepgramService {
         // Utterance assembly: track interims and use fallback if no final arrives
         this._lastInterimTranscript = '';
         this._interimTimer = null;
-        this._INTERIM_FALLBACK_MS = 1500; // Use interim as final after 1.5s of no new events
+        this._INTERIM_FALLBACK_MS = 2500; // Use interim as final after 2.5s of no new events
 
         // Final accumulator: collect is_final fragments until speech_final or UtteranceEnd
         this._finalAccumulator = '';
         this._finalFallbackTimer = null;
-        this._FINAL_FALLBACK_MS = 2000; // Deliver accumulated finals if no speech_final within 2s
+        this._FINAL_FALLBACK_MS = 3500; // Deliver accumulated finals if no speech_final within 3.5s (Hindi needs more time)
     }
 
     /**

@@ -183,13 +183,19 @@ class ConversationOrchestrator extends EventEmitter {
         // Reset silence timer
         this.resetSilenceTimer();
 
-        // If Gemini is already thinking, queue the transcript for after it responds
+        // If Gemini is already thinking, queue the transcript and abort the stale response
         if (this._isThinking) {
-            console.log(`[Orchestrator] Gemini busy, queueing transcript`);
+            console.log(`[Orchestrator] Gemini busy, queueing transcript and aborting stale response`);
             if (!this._queuedTranscript) {
                 this._queuedTranscript = transcript;
             } else {
                 this._queuedTranscript += ' ' + transcript;
+            }
+            // Signal that the current response is stale and should be skipped
+            this._abortCurrentResponse = true;
+            // Stop any in-progress TTS for the stale response
+            if (this.tts) {
+                this.tts.stop();
             }
             return;
         }
@@ -256,13 +262,16 @@ class ConversationOrchestrator extends EventEmitter {
             if (this._queuedTranscript && !this._aborted) {
                 const queued = this._queuedTranscript;
                 this._queuedTranscript = null;
-                console.log(`[Orchestrator] Processing queued transcript: ${queued}`);
+                // Combine original + queued into one full question so Gemini
+                // gets the complete context instead of two fragmented messages
+                const combinedTranscript = `${fullTranscript} ${queued}`;
+                console.log(`[Orchestrator] Processing combined transcript (original + queued): ${combinedTranscript}`);
                 this.conversationLog.push({
                     role: 'user',
-                    content: queued,
+                    content: combinedTranscript,
                     timestamp: new Date()
                 });
-                await this.getAIResponse(queued);
+                await this.getAIResponse(combinedTranscript);
             }
         }, 500);
     }
@@ -429,6 +438,16 @@ class ConversationOrchestrator extends EventEmitter {
                 return;
             }
 
+            // Check if a new transcript arrived while Gemini was thinking—
+            // if so, this response is stale and should be skipped entirely.
+            if (this._abortCurrentResponse) {
+                console.log(`[Orchestrator] Aborting stale response — new user speech arrived during thinking`);
+                this._abortCurrentResponse = false;
+                this._isThinking = false;
+                // Don't speak anything — the caller will process the queued transcript next
+                return;
+            }
+
             // Flush any remaining text (last sentence that had no trailing whitespace)
             if (sentenceBuffer.trim()) {
                 enqueueSentence(sentenceBuffer, true); // force=true flushes merge buffer
@@ -540,6 +559,7 @@ class ConversationOrchestrator extends EventEmitter {
             }
         } finally {
             this._isThinking = false;
+            this._abortCurrentResponse = false;
         }
     }
 
