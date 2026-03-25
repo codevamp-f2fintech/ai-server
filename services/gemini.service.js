@@ -130,6 +130,13 @@ class GeminiService {
             console.log('[Gemini] firstMessage appended to system prompt:', config.firstMessage.substring(0, 80));
         }
 
+        // Enforce Devanagari script if language is Hindi
+        const langCode = (config.transcriberLanguage || 'en').substring(0, 2).toLowerCase();
+        if (langCode === 'hi') {
+            systemPrompt += `\n\n[LANGUAGE REQUIREMENT]\nYou must write ALL your responses ENTIRELY in Devanagari script (Hindi script). Do NOT use any English letters (A-Z) in your response, even for English words or names. Transliterate all English words into Devanagari. For example, instead of "Education", write "एजुकेशन". This is critical for the text-to-speech engine.`;
+            console.log('[Gemini] Enforcing Devanagari script for Hindi language');
+        }
+
         // Initialize model
         this.model = this.genAI.getGenerativeModel({
             model: modelName,
@@ -233,6 +240,23 @@ class GeminiService {
      */
     getHistory() {
         return this.conversationHistory;
+    }
+
+    /**
+     * Transliterate text to Devanagari script
+     * @param {string} text - Text to transliterate
+     * @returns {Promise<string>} - Transliterated text
+     */
+    async transliterateToHindi(text) {
+        if (!text || !/[a-zA-Z]/.test(text)) return text;
+        try {
+            const prompt = `Transliterate the following text entirely into Devanagari script (Hindi). Keep the exact same meaning and phrasing, just write the English names/words in Devanagari. Return ONLY the transliterated text without any quotes or extra explanation:\n\n${text}`;
+            const result = await this.model.generateContent(prompt);
+            return result.response.text().trim();
+        } catch (error) {
+            console.error('[Gemini] Transliteration error:', error);
+            return text; // fallback
+        }
     }
 
     /**

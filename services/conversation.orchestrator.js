@@ -27,6 +27,17 @@ function stripMarkdown(text) {
         .trim();
 }
 
+/**
+ * Check if text is ONLY audio/emotion tags with no actual speakable content.
+ * Tags like [exhales], [sighs], [pause] cause ElevenLabs 400 when sent alone.
+ */
+function isOnlyAudioTags(text) {
+    const stripped = text
+        .replace(/\[(?:exhales|sighs|gasps|clears throat|laughs|pause|short pause|long pause|friendly|excited|calm|confident|nervous|sorrowful|concerned|reassuring|whispers|speaking softly|loudly|rushed|slows down|stammers|drawn out|hesitates)\]/gi, '')
+        .trim();
+    return stripped.length === 0;
+}
+
 class ConversationOrchestrator extends EventEmitter {
     constructor(agentConfig, apiKeys) {
         super();
@@ -96,6 +107,7 @@ class ConversationOrchestrator extends EventEmitter {
         await this.gemini.initializeConversation({
             ...(this.agentConfig.model || {}),
             knowledgeBase: this.agentConfig.knowledgeBase || [],
+            transcriberLanguage: this.agentConfig.transcriber?.language,
             firstMessage: (this.agentConfig.firstMessageMode === 'assistant-speaks-first' && this.agentConfig.firstMessage)
                 ? this.agentConfig.firstMessage : null
         });
@@ -321,8 +333,16 @@ class ConversationOrchestrator extends EventEmitter {
                         let firstChunk = true;
                         const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
                         const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
+                        
+                        let finalText = text;
+                        if (langCode === 'hi' && this.tts instanceof ChatterboxService && /[a-zA-Z]/.test(finalText)) {
+                            console.log('[Orchestrator] English characters detected in chunk, transliterating...');
+                            finalText = await this.gemini.transliterateToHindi(finalText);
+                            console.log(`[Orchestrator] Transliterated chunk to: ${finalText}`);
+                        }
+
                         await this.tts.textToSpeechStream(
-                            text,
+                            finalText,
                             { ...this.agentConfig.voice, language: this.agentConfig.voice?.language || langCode },
                             (chunk) => {
                                 if (firstChunk) {
@@ -352,6 +372,12 @@ class ConversationOrchestrator extends EventEmitter {
 
                 const cleanText = stripMarkdown(sentence);
                 if (!cleanText) return;
+
+                // Skip standalone audio-only tags — they cause ElevenLabs 400 errors
+                if (isOnlyAudioTags(cleanText)) {
+                    console.log(`[Orchestrator] Skipping audio-only tag: ${cleanText}`);
+                    return;
+                }
 
                 // Accumulate in merge buffer
                 ttsMergeBuf = ttsMergeBuf ? `${ttsMergeBuf} ${cleanText}` : cleanText;
@@ -530,8 +556,18 @@ class ConversationOrchestrator extends EventEmitter {
         this.clearSilenceTimer(); // Pause timeout during speech
 
         // Strip Markdown formatting - asterisks, headers etc. create noise in TTS
-        const cleanText = stripMarkdown(text);
+        let cleanText = stripMarkdown(text);
         if (!cleanText) return;
+
+        const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
+        
+        // XTTS Chatterbox backend fails silently if Hindi text contains English characters.
+        // We transliterate using Gemini on the fly if needed.
+        if (langCode === 'hi' && this.tts instanceof ChatterboxService && /[a-zA-Z]/.test(cleanText)) {
+            console.log('[Orchestrator] English characters detected in Hindi text, transliterating via Gemini...');
+            cleanText = await this.gemini.transliterateToHindi(cleanText);
+            console.log(`[Orchestrator] Transliterated to: ${cleanText}`);
+        }
 
         this.state = 'speaking';
         this.emit('speaking', cleanText);
@@ -542,7 +578,6 @@ class ConversationOrchestrator extends EventEmitter {
         console.log(`[Orchestrator] Speaking: ${cleanText}`);
 
         try {
-            const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
             await this.tts.textToSpeechStream(
                 cleanText,
                 { ...this.agentConfig.voice, language: this.agentConfig.voice?.language || langCode },
