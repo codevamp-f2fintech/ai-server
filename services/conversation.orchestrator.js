@@ -157,6 +157,18 @@ class ConversationOrchestrator extends EventEmitter {
             (interimTranscript) => {
                 console.log(`[Orchestrator] User speaking (interim): ${interimTranscript}`);
                 this.resetSilenceTimer();
+
+                // Barge-in: if user speaks while agent is speaking, stop and listen
+                if (this.state === 'speaking' && !this._bargeInTriggered) {
+                    this._bargeInTriggered = true;
+                    console.log(`[Orchestrator] Barge-in detected! User interrupted — stopping speech to listen`);
+                    // Stop TTS generation
+                    if (this.tts) this.tts.stop();
+                    // Signal SipMediaBridge to clear outgoing audio queue
+                    this.emit('barge_in');
+                    // Transition to listening
+                    this.state = 'listening';
+                }
             }
         );
 
@@ -288,6 +300,7 @@ class ConversationOrchestrator extends EventEmitter {
         this.clearSilenceTimer(); // Ensure we don't timeout while thinking or speaking
         this.state = 'thinking';
         this._isThinking = true;
+        this._bargeInTriggered = false; // Reset barge-in flag for new response
         this.emit('thinking');
 
         // CRITICAL: Clear Deepgram buffer immediately so stale audio from before
@@ -331,7 +344,7 @@ class ConversationOrchestrator extends EventEmitter {
                 console.log(`[Orchestrator] → TTS: ${text.substring(0, 80)}`);
 
                 ttsChain = ttsChain.then(async () => {
-                    if (this._aborted) return;
+                    if (this._aborted || this._bargeInTriggered) return;
 
                     if (capturedIsFirst) {
                         this.deepgram.clearBuffer();

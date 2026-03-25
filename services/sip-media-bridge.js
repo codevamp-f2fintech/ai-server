@@ -216,6 +216,14 @@ class SipMediaBridge {
             }
         });
 
+        // Barge-in: user interrupted while agent was speaking — clear outgoing audio immediately
+        orchestrator.on('barge_in', () => {
+            console.log(`[SipMediaBridge] [${internalCallId}] Barge-in! Clearing audio queue`);
+            if (session.sipService && session.sipCallId) {
+                session.sipService.clearAudioQueue(session.sipCallId);
+            }
+        });
+
         orchestrator.on('thinking', () => {
             console.log(`[SipMediaBridge] [${internalCallId}] AI thinking...`);
             // NOTE: Do NOT clear the audio queue here.
