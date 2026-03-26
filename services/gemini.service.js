@@ -137,14 +137,23 @@ class GeminiService {
             console.log('[Gemini] Enforcing Devanagari script for Hindi language');
         }
 
+        // Determine output token limit (Devanagari uses ~3-4x more tokens than English)
+        const maxOutputTokens = config.maxTokens || 2048;
+
         // Initialize model
+        // IMPORTANT: Disable thinking for Gemini 2.5 Flash — thinking tokens consume
+        // the maxOutputTokens budget, causing mid-sentence truncation and 5s+ latency.
+        // A phone call agent needs fast, simple responses, not deep reasoning.
         this.model = this.genAI.getGenerativeModel({
             model: modelName,
             generationConfig: {
                 temperature: config.temperature || 0.7,
-                maxOutputTokens: config.maxTokens || 500,
+                maxOutputTokens,
                 topP: 0.95,
-                topK: 40
+                topK: 40,
+                thinkingConfig: {
+                    thinkingBudget: 0  // Disable thinking entirely
+                }
             },
             systemInstruction: systemPrompt
         });
@@ -154,7 +163,10 @@ class GeminiService {
             history: [],
             generationConfig: {
                 temperature: config.temperature || 0.7,
-                maxOutputTokens: config.maxTokens || 500
+                maxOutputTokens,
+                thinkingConfig: {
+                    thinkingBudget: 0
+                }
             }
         });
 
