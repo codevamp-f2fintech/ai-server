@@ -220,7 +220,7 @@ class SipMediaBridge {
         orchestrator.on('barge_in', () => {
             console.log(`[SipMediaBridge] [${internalCallId}] Barge-in! Clearing audio queue`);
             if (session.sipService && session.sipCallId) {
-                session.sipService.clearAudioQueue(session.sipCallId);
+                session.sipService.clearAudioQueue(session.sipCallId, true); // force=true bypasses anti-echo
             }
         });
 

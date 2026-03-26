@@ -329,7 +329,7 @@ class ConversationOrchestrator extends EventEmitter {
 
             // Fire accumulated text as TTS
             const _fireTTS = (text) => {
-                if (!text || this._aborted) return;
+                if (!text || this._aborted || this._bargeInTriggered) return;
 
                 if (!ttsStarted) {
                     ttsStarted = true;

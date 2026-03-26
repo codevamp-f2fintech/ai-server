@@ -1277,14 +1277,15 @@ class SipTrunkService extends EventEmitter {
      * Automatically ignores interruptions within 1 second of last queue clear 
      * or if the AI is actively starting to speak, to prevent echo/noise truncation.
      */
-    clearAudioQueue(callId) {
+    clearAudioQueue(callId, force = false) {
         const callData = this.activeCalls.get(callId);
         if (callData) {
             // Anti-echo block: if we're actively pumping audio, and a tiny bit of noise comes in,
             // don't instantly wipe the whole queue unless it's a real interruption.
             // Raised from 50 → 150: Chatterbox delivers audio in ONE large burst, so a long
             // Hindi sentence can fill 200+ packets instantly. 50 packets (1s) was too low.
-            if (callData.audioQueue && callData.audioQueue.length > 150) {
+            // EXCEPTION: force=true bypasses this (used for explicit barge-in from user speech)
+            if (!force && callData.audioQueue && callData.audioQueue.length > 150) {
                  // > 150 packets = ~3 seconds of audio. Almost certainly an echo of the AI's own voice.
                  console.log(`[SipTrunk] Ignoring clearAudioQueue (anti-echo protection, ${callData.audioQueue.length} packets remain) for call ${callId}`);
                  return;
@@ -1299,6 +1300,9 @@ class SipTrunkService extends EventEmitter {
             callData.audioCarryBuffer = Buffer.alloc(0);
             callData.isSendingAudio = false;
             callData.lastAudioSentTime = Date.now();
+            if (force) {
+                console.log(`[SipTrunk] Audio queue force-cleared (barge-in) for call ${callId}`);
+            }
             this.emit('playback_complete', callId);
         }
     }
