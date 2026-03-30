@@ -224,7 +224,7 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Wait 500ms for more transcript finals before processing
+        // Wait 100ms for more transcript finals before processing
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -255,8 +255,8 @@ class ConversationOrchestrator extends EventEmitter {
             // during the response delay below
             this._isThinking = true;
 
-            // Apply configured response delay (cap at 3s to be safe)
-            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 3000);
+            // Apply configured response delay (cap at 100ms to reduce latency)
+            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 100);
             if (delayMs > 0) await this.delay(delayMs);
             console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
 
@@ -285,7 +285,7 @@ class ConversationOrchestrator extends EventEmitter {
                 });
                 await this.getAIResponse(combinedTranscript);
             }
-        }, 500);
+        }, 100);
     }
 
     /**
