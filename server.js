@@ -37,8 +37,8 @@ const Call = require('./models/Call');
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
-app.use(express.urlencoded({ extended: true })); // For Twilio webhooks
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true })); // For Twilio webhooks
 
 // Mount routes
 app.use('/vapi/agents', agentRoutes);
