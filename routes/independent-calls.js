@@ -20,7 +20,7 @@ const SipTrunkService = require('../services/sip-trunk.service');
  */
 router.post('/outbound', authenticate, async (req, res) => {
     try {
-        const { to, agentId, variables } = req.body;
+        const { to, agentId, variables, campaignName } = req.body;
 
         if (!to) {
             return res.status(400).json({ error: 'Phone number is required' });
@@ -144,6 +144,7 @@ router.post('/outbound', authenticate, async (req, res) => {
                 phoneCallProviderId: call.sipCallId,
                 phoneCallTransport: 'sip',
                 variables: variables || undefined,
+                campaignName: campaignName || undefined,
                 startedAt: new Date(),
                 createdAt: new Date()
             });
@@ -175,6 +176,7 @@ router.post('/outbound', authenticate, async (req, res) => {
                 phoneCallProviderId: call.sid,
                 phoneCallTransport: 'pstn',
                 variables: variables || undefined,
+                campaignName: campaignName || undefined,
                 startedAt: new Date(),
                 createdAt: new Date()
             });

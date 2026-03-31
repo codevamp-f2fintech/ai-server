@@ -187,6 +187,27 @@ app.get('/calls/list', authenticate, async (req, res) => {
   }
 });
 
+// SECURED: Get interested/follow-up leads
+app.get('/leads/list', authenticate, async (req, res) => {
+  try {
+    const { agentId } = req.query;
+    let query = { 
+      userId: req.userId,
+      leadStatus: { $in: ['interested', 'follow-up'] } 
+    };
+
+    if (agentId) {
+      query.agentId = agentId;
+    }
+
+    const leads = await Call.find(query).sort({ createdAt: -1 });
+    res.status(200).json(leads);
+  } catch (err) {
+    console.error('Failed to fetch leads', err);
+    res.status(500).json({ error: 'Failed to fetch leads' });
+  }
+});
+
 // SECURED: Inbound calls list requires authentication
 app.get('/inbound-calls/list', authenticate, async (req, res) => {
   try {

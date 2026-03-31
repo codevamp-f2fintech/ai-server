@@ -303,8 +303,8 @@ class SipMediaBridge {
 
             // 5. Update Call record in database
             try {
-                // Generate AI summary using Gemini
-                const summary = await this.generateCallSummary(conversationLog);
+                // Generate AI summary and lead status using Gemini
+                const callInfo = await this.generateCallSummary(conversationLog);
 
                 await Call.findByIdAndUpdate(
                     internalCallId,
@@ -315,7 +315,8 @@ class SipMediaBridge {
                         durationSeconds: Math.round(duration),
                         transcript: JSON.stringify(conversationLog),
                         recordingUrl: recordingUrl || undefined,
-                        summary
+                        summary: callInfo.summary,
+                        leadStatus: callInfo.leadStatus
                     },
                     { upsert: false }
                 );
@@ -346,34 +347,53 @@ class SipMediaBridge {
     }
 
     /**
-     * Generate AI call summary using Gemini
+     * Generate AI call summary and determine lead status using Gemini
      */
     async generateCallSummary(conversationLog) {
         const userMessages = conversationLog.filter(m => m.role === 'user');
         const assistantMessages = conversationLog.filter(m => m.role === 'assistant');
 
         if (userMessages.length === 0 && assistantMessages.length === 0) {
-            return 'No conversation recorded';
+            return { summary: 'No conversation recorded', leadStatus: 'unknown' };
         }
 
         try {
             const { GoogleGenerativeAI } = require('@google/generative-ai');
             const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-            const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+            const model = genAI.getGenerativeModel({ 
+                model: 'gemini-2.5-flash',
+                generationConfig: {
+                    responseMimeType: 'application/json'
+                }
+            });
 
             const transcriptText = conversationLog
                 .map(m => `${m.role === 'user' ? 'Customer' : 'AI Agent'}: ${m.content}`)
                 .join('\n');
 
             const result = await model.generateContent(
-                `Summarize this phone call conversation in 2-3 concise sentences. Focus on the key topics discussed, any decisions made, and the outcome of the call. Do not use markdown formatting:\n\n${transcriptText}`
+                `Analyze this phone call conversation. Return a JSON object with two fields:
+1. "summary": A 2-3 sentence concise summary of the call, focusing on key topics, decisions, and outcomes.
+2. "leadStatus": Classify the customer's interest level into ONE of these exact string values: "interested", "not-interested", "follow-up", "not-applicable", or "unknown".
+
+Conversation Transcript:
+${transcriptText}`
             );
-            const summary = result.response.text();
-            console.log('[SipMediaBridge] AI Summary generated:', summary.substring(0, 100));
-            return summary;
+            
+            const responseText = result.response.text();
+            const parsed = JSON.parse(responseText);
+            
+            console.log('[SipMediaBridge] AI Call Info generated:', parsed);
+            return {
+                summary: parsed.summary || 'Summary unavailable',
+                leadStatus: parsed.leadStatus || 'unknown'
+            };
         } catch (err) {
             console.error('[SipMediaBridge] Failed to generate AI summary:', err.message);
-            return `Conversation with ${userMessages.length} customer messages and ${assistantMessages.length} agent responses.`;
+            return {
+                summary: `Conversation with ${userMessages.length} customer messages and ${assistantMessages.length} agent responses.`,
+                leadStatus: 'unknown'
+            };
         }
     }
 

@@ -22,6 +22,9 @@ const callSchema = new mongoose.Schema({
     },
     status: String, // 'initiated', 'ringing', 'in-progress', 'completed', 'ended', 'failed'
     endedReason: String,
+    campaignName: { type: String, default: null },
+    leadStatus: { type: String, enum: ['interested', 'not-interested', 'follow-up', 'not-applicable', 'unknown'], default: 'unknown' },
+    extractedData: mongoose.Schema.Types.Mixed,
     durationSeconds: { type: Number, default: 0 },
     messages: [mongoose.Schema.Types.Mixed],
     phoneCallProvider: String, // 'twilio'

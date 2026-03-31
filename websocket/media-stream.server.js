@@ -337,21 +337,39 @@ class MediaStreamServer {
 
             // Generate AI summary from conversation log using Gemini
             let summary = '';
+            let leadStatus = 'unknown';
+
             if (data.conversationLog && data.conversationLog.length > 0) {
                 try {
                     const { GoogleGenerativeAI } = require('@google/generative-ai');
                     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-                    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+                    const model = genAI.getGenerativeModel({ 
+                        model: 'gemini-2.5-flash',
+                        generationConfig: {
+                            responseMimeType: 'application/json'
+                        }
+                    });
 
                     const transcriptText = data.conversationLog
                         .map(m => `${m.role === 'user' ? 'Customer' : 'AI Agent'}: ${m.content}`)
                         .join('\n');
 
                     const result = await model.generateContent(
-                        `Summarize this phone call conversation in 2-3 concise sentences. Focus on the key topics discussed, any decisions made, and the outcome of the call. Do not use markdown formatting:\n\n${transcriptText}`
+                        `Analyze this phone call conversation. Return a JSON object with two fields:
+1. "summary": A 2-3 sentence concise summary of the call, focusing on key topics, decisions, and outcomes.
+2. "leadStatus": Classify the customer's interest level into ONE of these exact string values: "interested", "not-interested", "follow-up", "not-applicable", or "unknown".
+
+Conversation Transcript:
+${transcriptText}`
                     );
-                    summary = result.response.text();
-                    console.log('[MediaStream] AI Summary generated:', summary.substring(0, 100));
+                    
+                    const responseText = result.response.text();
+                    const parsed = JSON.parse(responseText);
+                    
+                    summary = parsed.summary || 'Summary unavailable';
+                    leadStatus = parsed.leadStatus || 'unknown';
+                    
+                    console.log('[MediaStream] AI Call Info generated:', parsed);
                 } catch (err) {
                     console.error('[MediaStream] Failed to generate AI summary:', err.message);
                     // Fallback to basic summary
@@ -370,6 +388,7 @@ class MediaStreamServer {
                     messages: data.conversationLog,
                     recordingUrl: recordingUrl || undefined,
                     summary,
+                    leadStatus,
                     endedAt: new Date(),
                     updatedAt: new Date()
                 },
