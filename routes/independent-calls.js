@@ -21,187 +21,20 @@ const SipTrunkService = require('../services/sip-trunk.service');
 router.post('/outbound', authenticate, async (req, res) => {
     try {
         const { to, agentId, variables, campaignName } = req.body;
+        const CallService = require('../services/call.service');
 
-        if (!to) {
-            return res.status(400).json({ error: 'Phone number is required' });
-        }
-
-        if (!agentId) {
-            return res.status(400).json({ error: 'Agent ID is required' });
-        }
-
-        // Debug logging
-        console.log('[IndependentCalls] Received agentId:', agentId, 'Type:', typeof agentId);
-
-        // Validate ObjectId format
-        if (!/^[0-9a-fA-F]{24}$/.test(agentId)) {
-            console.log('[IndependentCalls] Invalid agentId format! Does not match MongoDB ObjectId pattern');
-            return res.status(400).json({
-                error: 'Invalid agent ID format',
-                message: 'Agent ID must be a valid MongoDB ObjectId. Please select a valid agent from the dropdown.'
-            });
-        }
-
-        // Verify agent exists and user owns it
-        const agent = await Agent.findOne({ _id: agentId, userId: req.userId });
-        console.log("[IndependentCalls] Agent found:", agent?.name);
-        if (!agent) {
-            return res.status(404).json({ error: 'Agent not found or you do not have permission to use it' });
-        }
-
-        if (agent.status !== 'active') {
-            return res.status(400).json({ error: 'Agent is not active' });
-        }
-
-        // Get the phone number to determine which provider to use
-        let phoneNumber = null;
-        if (agent.phoneNumberId) {
-            phoneNumber = await PhoneNumber.findById(agent.phoneNumberId);
-            console.log('[IndependentCalls] Phone number provider:', phoneNumber?.provider);
-        }
-
-        // Resolve nested configuration and apply {{variable}} substitution
-        let actualConfig = agent.configuration || {};
-        if (actualConfig.configuration && actualConfig.configuration.voice) {
-            actualConfig = actualConfig.configuration;
-        }
-        if (variables && typeof variables === 'object' && actualConfig.firstMessage) {
-            for (const [key, value] of Object.entries(variables)) {
-                actualConfig.firstMessage = actualConfig.firstMessage.replace(
-                    new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(value)
-                );
-            }
-            console.log('[IndependentCalls] firstMessage after variable substitution:', actualConfig.firstMessage);
-        }
-        // Strip any unresolved {{...}} placeholders so agent doesn't say them literally
-        if (actualConfig.firstMessage) {
-            actualConfig.firstMessage = actualConfig.firstMessage.replace(/\{\{\w+\}\}/g, '').replace(/\s{2,}/g, ' ').trim();
-        }
-
-        const Call = require('../models/Call');
-        let call, callRecord;
-
-        // Check if using SIP Trunk
-        if (phoneNumber && phoneNumber.provider === 'sip-trunk') {
-            console.log('[IndependentCalls] Using SIP Trunk provider');
-
-            // Create SipTrunkService
-            const sipService = SipTrunkService.createFromPhoneNumber(phoneNumber);
-
-            // Generate a unique call ID
-            const mongoose = require('mongoose');
-            const internalCallId = new mongoose.Types.ObjectId().toString();
-
-            // Get SipMediaBridge instance
-            const { getInstance: getSipMediaBridge } = require('../services/sip-media-bridge');
-            const sipMediaBridge = getSipMediaBridge();
-
-            // Set up event handlers for call lifecycle BEFORE making the call
-            sipService.on('answered', async ({ callId, internalCallId: iCallId }) => {
-                console.log('[IndependentCalls] SIP call answered, starting media bridge');
-
-                // Get API keys for AI services
-                const apiKeys = {
-                    deepgram: process.env.DEEPGRAM_API_KEY,
-                    gemini: process.env.GEMINI_API_KEY,
-                    elevenlabs: process.env.ELEVENLABS_API_KEY
-                };
-
-                try {
-                    await sipMediaBridge.startSession(iCallId, sipService, callId, agent, apiKeys, variables);
-                    console.log('[IndependentCalls] Media bridge session started');
-                } catch (err) {
-                    console.error('[IndependentCalls] Failed to start media bridge:', err);
-                }
-            });
-
-            sipService.on('ended', async ({ callId, internalCallId: iCallId }) => {
-                console.log('[IndependentCalls] SIP call ended');
-                await sipMediaBridge.onCallEnded(iCallId);
-            });
-
-            sipService.on('ringing', ({ callId, internalCallId: iCallId }) => {
-                console.log(`[IndependentCalls] SIP call ringing: ${iCallId}`);
-            });
-
-            sipService.on('trying', ({ callId, internalCallId: iCallId }) => {
-                console.log(`[IndependentCalls] SIP call trying: ${iCallId}`);
-            });
-
-            // Make call via SIP trunk
-            call = await sipService.makeCall(to, internalCallId);
-
-            // Save call to database
-            callRecord = new Call({
-                _id: internalCallId,
-                userId: req.userId,
-                agentId: agent._id,
-                agentName: agent.name,
-                type: 'outbound',
-                customer: { number: to },
-                status: 'initiated',
-                phoneCallProvider: 'sip-trunk',
-                phoneCallProviderId: call.sipCallId,
-                phoneCallTransport: 'sip',
-                variables: variables || undefined,
-                campaignName: campaignName || undefined,
-                startedAt: new Date(),
-                createdAt: new Date()
-            });
-
-        } else {
-            console.log('[IndependentCalls] Using Twilio provider');
-
-            // Create TwilioService with agent's phone number credentials (or fallback to .env)
-            const twilioService = await TwilioService.createFromAgent(agent);
-
-            // Make call via Twilio (pass variables as custom params)
-            call = await twilioService.makeCall(
-                to,
-                agentId,
-                process.env.BASE_URL,
-                variables
-            );
-
-            // Save call to database
-            callRecord = new Call({
-                _id: call.sid,
-                userId: req.userId,
-                agentId: agent._id,
-                agentName: agent.name,
-                type: 'outbound',
-                customer: { number: to },
-                status: 'initiated',
-                phoneCallProvider: 'twilio',
-                phoneCallProviderId: call.sid,
-                phoneCallTransport: 'pstn',
-                variables: variables || undefined,
-                campaignName: campaignName || undefined,
-                startedAt: new Date(),
-                createdAt: new Date()
-            });
-        }
-
-        await callRecord.save();
-
-        // Update agent statistics
-        agent.statistics.lastUsed = new Date();
-        await agent.save();
-
-        console.log(`[IndependentCalls] Outbound call initiated by user ${req.userId}: ${call.sid}`);
+        const callData = await CallService.makeOutboundCall({
+            to,
+            agentId,
+            variables,
+            campaignName,
+            userId: req.userId
+        });
 
         res.json({
             success: true,
-            call: {
-                sid: call.sid,
-                to: call.to || to,
-                from: call.from || phoneNumber?.number,
-                status: call.status,
-                agentName: agent.name,
-                provider: phoneNumber?.provider || 'twilio'
-            }
+            call: callData
         });
-
     } catch (error) {
         console.error('[IndependentCalls] Error making outbound call:', error);
         res.status(500).json({

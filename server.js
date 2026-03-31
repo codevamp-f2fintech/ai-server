@@ -54,6 +54,10 @@ app.use('/api/independent-calls', independentCallRoutes);
 // Mount webhooks at root level (Twilio expects /webhooks/twilio/*)
 app.use(independentCallRoutes);
 
+// NEW: Queue-based Campaigns
+const campaignRoutes = require('./routes/campaigns');
+app.use('/api/campaigns', campaignRoutes);
+
 
 const VAPI_KEY = process.env.VAPI_KEY; // Optional - only used by legacy VAPI proxy routes
 if (!VAPI_KEY) {
@@ -291,6 +295,10 @@ const server = app.listen(PORT, () => {
   const MediaStreamServer = require('./websocket/media-stream.server');
   const mediaStreamServer = new MediaStreamServer(server);
   console.log('WebSocket Media Stream Server initialized');
+
+  // Start Background Campaign Queue Processor
+  const { startProcessor } = require('./services/campaign.processor');
+  startProcessor();
 });
 
 
