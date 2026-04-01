@@ -53,7 +53,7 @@ class ConversationOrchestrator extends EventEmitter {
         if (!this.agentConfig.firstMessageMode) this.agentConfig.firstMessageMode = 'assistant-speaks-first';
         if (!this.agentConfig.maxDurationSeconds) this.agentConfig.maxDurationSeconds = 600;
         if (!this.agentConfig.silenceTimeoutSeconds) this.agentConfig.silenceTimeoutSeconds = 30;
-        if (!this.agentConfig.responseDelaySeconds) this.agentConfig.responseDelaySeconds = 0.1;
+        if (!this.agentConfig.responseDelaySeconds) this.agentConfig.responseDelaySeconds = 0.05;
 
         console.log('[Orchestrator] Agent config loaded:');
         console.log('  - Voice ID:', this.agentConfig.voice?.voiceId || 'MISSING - will use default');
@@ -285,7 +285,7 @@ class ConversationOrchestrator extends EventEmitter {
                 });
                 await this.getAIResponse(combinedTranscript);
             }
-        }, 100);
+        }, 50);
     }
 
     /**
@@ -437,8 +437,9 @@ class ConversationOrchestrator extends EventEmitter {
                 // Accumulate in merge buffer
                 ttsMergeBuf = ttsMergeBuf ? `${ttsMergeBuf} ${cleanText}` : cleanText;
 
-                // Fire TTS when: buffer is long enough, OR forced (end of stream)
-                if (force || ttsMergeBuf.length >= MIN_TTS_CHARS) {
+                // Fire TTS when: buffer is long enough, OR forced (end of stream),
+                // OR if it's the FIRST sentence of the turn (Fast-Start bypass).
+                if (force || ttsMergeBuf.length >= MIN_TTS_CHARS || isFirstSentence) {
                     _fireTTS(ttsMergeBuf);
                     ttsMergeBuf = '';
                 }
