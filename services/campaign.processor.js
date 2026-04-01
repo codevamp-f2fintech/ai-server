@@ -1,5 +1,5 @@
 const Campaign = require('../models/Campaign');
-const CampaignLead = require('../models/CampaignLead');
+const CampaignCache = require('./campaign.cache');
 const CallService = require('./call.service');
 
 let isProcessing = false;
@@ -30,18 +30,12 @@ async function processQueues() {
 
                 if (availableSlots <= 0) continue;
 
-                const pendingLeads = await CampaignLead.find({
-                    campaignId: campaign._id,
-                    status: 'pending'
-                }).limit(availableSlots);
+                const pendingLeads = CampaignCache.getPendingLeads(campaign._id.toString(), availableSlots);
 
                 if (pendingLeads.length === 0 && activeCallsCount === 0) {
-                    // Check if everything is done
-                    const pendingCount = await CampaignLead.countDocuments({
-                        campaignId: campaign._id,
-                        status: 'pending'
-                    });
-                    if (pendingCount === 0) {
+                    // Check if everything is done by checking if ANY are left pending in RAM
+                    const hasPendingLeft = CampaignCache.getPendingLeads(campaign._id.toString(), 1).length > 0;
+                    if (!hasPendingLeft) {
                         campaign.status = 'completed';
                         await campaign.save();
                         console.log(`[CampaignProcessor] Campaign ${campaign.name} completed.`);
@@ -51,8 +45,7 @@ async function processQueues() {
 
                 // Initiate calls for pending leads
                 for (const lead of pendingLeads) {
-                    lead.status = 'calling'; // mark to prevent duplicate pickup
-                    await lead.save();
+                    lead.status = 'calling'; // Quick sync update in RAM
 
                     // Fire immediately without blocking the event loop
                     (async () => {
@@ -66,7 +59,7 @@ async function processQueues() {
                             });
                             
                             lead.callSid = callData.sid;
-                            lead.status = 'completed'; // completed initiating 
+                            lead.status = 'completed'; // Update in RAM
                             await Campaign.updateOne({ _id: campaign._id }, { $inc: { completedLeads: 1 } });
                         } catch (err) {
                             console.error(`[CampaignProcessor] Error calling ${lead.to}:`, err.message);
@@ -74,7 +67,6 @@ async function processQueues() {
                             lead.errorMessage = err.message || 'Call failed';
                             await Campaign.updateOne({ _id: campaign._id }, { $inc: { failedLeads: 1 } });
                         }
-                        await lead.save();
                     })();
                 }
             } catch (err) {

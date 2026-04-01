@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticate } = require('../middleware/auth');
 const Campaign = require('../models/Campaign');
-const CampaignLead = require('../models/CampaignLead');
+const CampaignCache = require('../services/campaign.cache');
 
 // POST /api/campaigns
 router.post('/', authenticate, async (req, res) => {
@@ -19,19 +19,15 @@ router.post('/', authenticate, async (req, res) => {
             agentId,
             concurrency: parseInt(concurrency, 10) || 3,
             totalLeads: leads.length,
-            status: 'running'
+            status: 'pending'
         });
         await campaign.save();
 
-        const leadDocs = leads.map(l => ({
-            campaignId: campaign._id,
-            to: l.to,
-            name: l.name || '',
-            variables: l.variables || {},
-            status: 'pending'
-        }));
+        // Store raw numbers securely into RAM Cache instead of DB
+        CampaignCache.initCampaign(campaign._id.toString(), leads);
 
-        await CampaignLead.insertMany(leadDocs);
+        campaign.status = 'running';
+        await campaign.save();
 
         res.status(201).json({ success: true, campaignId: campaign._id });
     } catch (err) {
@@ -56,7 +52,7 @@ router.get('/:id', authenticate, async (req, res) => {
         const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.userId });
         if (!campaign) return res.status(404).json({ error: 'Not found' });
 
-        const leads = await CampaignLead.find({ campaignId: campaign._id });
+        const leads = CampaignCache.getLeads(campaign._id.toString());
         
         res.json({
             campaign,
@@ -80,8 +76,14 @@ router.post('/:id/control', authenticate, async (req, res) => {
         else if (action === 'resume') campaign.status = 'running';
         else if (action === 'cancel') {
             campaign.status = 'canceled';
-            // Optionally, mark pending leads as failed or just leave them
-            await CampaignLead.updateMany({ campaignId: campaign._id, status: 'pending' }, { status: 'failed', errorMessage: 'Campaign canceled' });
+            // Mark RAM leads as failed
+            const leads = CampaignCache.getLeads(campaign._id.toString());
+            leads.forEach(l => { 
+                if (l.status === 'pending') {
+                    l.status = 'failed'; 
+                    l.errorMessage = 'Canceled';
+                }
+            });
         }
         else return res.status(400).json({ error: 'Invalid action' });
 
