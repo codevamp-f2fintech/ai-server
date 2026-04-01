@@ -53,7 +53,7 @@ class ConversationOrchestrator extends EventEmitter {
         if (!this.agentConfig.firstMessageMode) this.agentConfig.firstMessageMode = 'assistant-speaks-first';
         if (!this.agentConfig.maxDurationSeconds) this.agentConfig.maxDurationSeconds = 600;
         if (!this.agentConfig.silenceTimeoutSeconds) this.agentConfig.silenceTimeoutSeconds = 30;
-        if (!this.agentConfig.responseDelaySeconds) this.agentConfig.responseDelaySeconds = 0; // No artificial delay
+        if (!this.agentConfig.responseDelaySeconds) this.agentConfig.responseDelaySeconds = 0.1;
 
         console.log('[Orchestrator] Agent config loaded:');
         console.log('  - Voice ID:', this.agentConfig.voice?.voiceId || 'MISSING - will use default');
@@ -224,8 +224,7 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // NO accumulation delay — speech_final already ensures utterance is complete.
-        // Fire Gemini immediately to start streaming the response ASAP.
+        // Wait 100ms for more transcript finals before processing
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -256,10 +255,10 @@ class ConversationOrchestrator extends EventEmitter {
             // during the response delay below
             this._isThinking = true;
 
-            // Apply configured response delay — set to 0 by default to minimize latency
-            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 50);
+            // Apply configured response delay (cap at 100ms to reduce latency)
+            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 100);
             if (delayMs > 0) await this.delay(delayMs);
-            if (delayMs > 0) console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
+            console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
 
             // Check again after delay - call may have ended during wait
             if (this._aborted) {
@@ -286,7 +285,7 @@ class ConversationOrchestrator extends EventEmitter {
                 });
                 await this.getAIResponse(combinedTranscript);
             }
-        }, 0); // 0ms — speech_final already guarantees utterance is complete, no need to wait
+        }, 100);
     }
 
     /**
@@ -323,10 +322,10 @@ class ConversationOrchestrator extends EventEmitter {
             let ttsChain = Promise.resolve();
 
             // TTS merge buffer: accumulate short sentences to reduce API round-trips.
-            // Each ElevenLabs/Chatterbox call has latency overhead, so we merge sentences
-            // until we have ≥40 chars before firing TTS. Higher threshold = fewer calls = lower total latency.
+            // Each ElevenLabs/Chatterbox call has ~500ms TTFA overhead, so we merge sentences
+            // until we have ≥20 chars before firing TTS.
             let ttsMergeBuf = '';
-            const MIN_TTS_CHARS = 40;
+            const MIN_TTS_CHARS = 20;
 
             // Fire accumulated text as TTS
             const _fireTTS = (text) => {
@@ -356,7 +355,7 @@ class ConversationOrchestrator extends EventEmitter {
                         let firstChunk = true;
                         const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
                         const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
-                        
+
                         let finalText = text;
                         if (langCode === 'hi' && this.tts instanceof ChatterboxService && /[a-zA-Z]/.test(finalText)) {
                             console.log('[Orchestrator] English characters detected in chunk, transliterating...');
@@ -534,7 +533,7 @@ class ConversationOrchestrator extends EventEmitter {
                 const onWaitEnd = () => finish();
                 this.once('playback_complete', onWaitEnd);
                 this.once('user_speech', onWaitEnd);
-                
+
                 // Safety timeout
                 const timeout = setTimeout(() => finish(), 15000);
             });
@@ -594,7 +593,7 @@ class ConversationOrchestrator extends EventEmitter {
         if (!cleanText) return;
 
         const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
-        
+
         // XTTS Chatterbox backend fails silently if Hindi text contains English characters.
         // We transliterate using Gemini on the fly if needed.
         if (langCode === 'hi' && this.tts instanceof ChatterboxService && /[a-zA-Z]/.test(cleanText)) {
