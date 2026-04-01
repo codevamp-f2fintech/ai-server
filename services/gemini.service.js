@@ -126,8 +126,8 @@ class GeminiService {
         // If firstMessage was already spoken, append it to the system prompt
         // so Gemini knows what it already said and won't repeat the introduction
         if (config.firstMessage) {
-            systemPrompt += `\n\n[IMPORTANT CONTEXT]\nYou have ALREADY greeted the customer with this exact message: "${config.firstMessage}"\nDo NOT introduce yourself again. Do NOT repeat this greeting. The customer has already heard it. Continue the conversation naturally from here. Infer the customer's gender from their name and use "Sir" or "Ma'am" accordingly. If unsure, default to "Sir". Never say "Sir/Ma'am" together.`;
-            console.log('[Gemini] firstMessage appended to system prompt:', config.firstMessage.substring(0, 80));
+            systemPrompt += `\n\n[HARD RULE - DO NOT BREAK]\nYou have ALREADY spoken your opening message to the customer: "${config.firstMessage}"\n\nCRITICAL RULES (NEVER violate these):\n1. NEVER say your name (Priya or any name) again — you already introduced yourself.\n2. NEVER say the company name (F2 Fintech or any company name) as an introduction — you already did this.\n3. NEVER say "मैं [name] बोल रही/रहा हूँ" or any variation of this — you already said it.\n4. NEVER say "हम [company] से हैं" or any variation — already said.\n5. Infer the customer's gender from their name and use "Sir" or "Ma'am" accordingly. If unsure, default to "Sir". Never say "Sir/Ma'am" together.\n6. Jump straight into the conversation from where the opening message left off. Treat the conversation as already in progress.`;
+            console.log('[Gemini] Anti-reintroduction HARD RULE appended to system prompt');
         }
 
         // Enforce Devanagari script if language is Hindi
