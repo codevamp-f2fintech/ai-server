@@ -298,7 +298,15 @@ const server = app.listen(PORT, () => {
 
   // Start Background Campaign Queue Processor
   const { startProcessor } = require('./services/campaign.processor');
-  startProcessor();
+  const CampaignCache = require('./services/campaign.cache');
+  
+  // Rescue any hanging leads before starting the processor
+  CampaignCache.rescueHangingLeads()
+    .then(() => startProcessor())
+    .catch(err => {
+      console.error('[Startup] Failed to rescue leads:', err);
+      startProcessor();
+    });
 });
 
 

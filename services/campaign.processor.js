@@ -1,4 +1,5 @@
 const Campaign = require('../models/Campaign');
+const CampaignLead = require('../models/CampaignLead');
 const CampaignCache = require('./campaign.cache');
 const CallService = require('./call.service');
 
@@ -13,12 +14,7 @@ async function processQueues() {
 
         for (const campaign of campaigns) {
             try {
-                // Note: The status 'calling' indicates we've initiated the outbound call.
-                // Since independent calls continue running outside the processor,
-                // 'calling' means "handled by CallService". If we want to strictly limit 
-                // concurrency of ACTIVE calls, we'd need to check the actual Call model status.
-                // For bulk starting purposes, limiting the rate of initiation is usually sufficient,
-                // but let's check true active calls if we want exact concurrency.
+                // Limit concurrency by checking ACTIVE calls in the Call model
                 const Call = require('../models/Call');
                 const activeCallsCount = await Call.countDocuments({
                     campaignName: campaign.name,
@@ -30,12 +26,17 @@ async function processQueues() {
 
                 if (availableSlots <= 0) continue;
 
-                const pendingLeads = CampaignCache.getPendingLeads(campaign._id.toString(), availableSlots);
+                // Pull pending leads from MongoDB instead of RAM
+                const pendingLeads = await CampaignCache.getPendingLeads(campaign._id.toString(), availableSlots);
 
-                if (pendingLeads.length === 0 && activeCallsCount === 0) {
-                    // Check if everything is done by checking if ANY are left pending in RAM
-                    const hasPendingLeft = CampaignCache.getPendingLeads(campaign._id.toString(), 1).length > 0;
-                    if (!hasPendingLeft) {
+                if (pendingLeads.length === 0) {
+                    // Check if everything is done by checking if ANY are left pending in DB
+                    const hasPendingLeft = await CampaignLead.countDocuments({
+                        campaignId: campaign._id,
+                        status: 'pending'
+                    }) > 0;
+
+                    if (!hasPendingLeft && activeCallsCount === 0) {
                         campaign.status = 'completed';
                         await campaign.save();
                         console.log(`[CampaignProcessor] Campaign ${campaign.name} completed.`);
@@ -45,7 +46,9 @@ async function processQueues() {
 
                 // Initiate calls for pending leads
                 for (const lead of pendingLeads) {
-                    lead.status = 'calling'; // Quick sync update in RAM
+                    // Mark as 'calling' in DB immediately to prevent double processing
+                    lead.status = 'calling';
+                    await lead.save();
 
                     // Fire immediately without blocking the event loop
                     (async () => {
@@ -59,12 +62,18 @@ async function processQueues() {
                             });
                             
                             lead.callSid = callData.sid;
-                            lead.status = 'completed'; // Update in RAM
-                            await Campaign.updateOne({ _id: campaign._id }, { $inc: { completedLeads: 1 } });
+                            // Note: 'completed' status for lead will be handled after call finishes
+                            // in sip-media-bridge.js listeners or here as 'initiated'.
+                            // For now, we update with SID.
+                            await lead.save();
+
+                            // We don't increment completedLeads here yet, 
+                            // it should be done when the call actually ends.
                         } catch (err) {
                             console.error(`[CampaignProcessor] Error calling ${lead.to}:`, err.message);
                             lead.status = 'failed';
                             lead.errorMessage = err.message || 'Call failed';
+                            await lead.save();
                             await Campaign.updateOne({ _id: campaign._id }, { $inc: { failedLeads: 1 } });
                         }
                     })();
@@ -81,7 +90,7 @@ async function processQueues() {
 }
 
 function startProcessor() {
-    console.log('[CampaignProcessor] Started background queue processor');
+    console.log('[CampaignProcessor] Started background queue processor (MongoDB Persistence Mode)');
     // Run every 3 seconds
     setInterval(processQueues, 3000);
 }

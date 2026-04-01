@@ -6,6 +6,8 @@ const ConversationOrchestrator = require('./conversation.orchestrator');
 const { getInstance: getRecordingService } = require('./recording.service');
 const Agent = require('../models/Agent');
 const Call = require('../models/Call');
+const CampaignLead = require('../models/CampaignLead');
+const Campaign = require('../models/Campaign');
 
 class SipMediaBridge {
     constructor() {
@@ -321,8 +323,39 @@ class SipMediaBridge {
                     { upsert: false }
                 );
                 console.log(`[SipMediaBridge] Call record updated: ${internalCallId}`);
+
+                // 5.5 Update CampaignLead if this was a campaign call
+                const callRecord = await Call.findById(internalCallId);
+                if (callRecord && callRecord.campaignName) {
+                    console.log(`[SipMediaBridge] Updating CampaignLead for campaign: ${callRecord.campaignName}`);
+                    
+                    // Update campaign stats
+                    if (callInfo.leadStatus === 'interested') {
+                        await Campaign.updateOne({ name: callRecord.campaignName, userId: callRecord.userId }, { $inc: { completedLeads: 1 } });
+                    }
+
+                    // Update the specific lead record
+                    await CampaignLead.updateOne(
+                        { 
+                            campaignId: { $in: await Campaign.find({ name: callRecord.campaignName, userId: callRecord.userId }).distinct('_id') },
+                            to: callRecord.customer.number,
+                            status: 'calling'
+                        },
+                        {
+                            $set: {
+                                status: 'completed',
+                                callSid: internalCallId,
+                                leadType: callInfo.leadType || 'unknown',
+                                leadProfile: callInfo.leadProfile || 'unknown',
+                                statusClassification: callInfo.statusClassification || callInfo.leadStatus,
+                                remark: callInfo.summary,
+                                lastCalledAt: new Date()
+                            }
+                        }
+                    );
+                }
             } catch (err) {
-                console.error(`[SipMediaBridge] Error updating call record:`, err);
+                console.error(`[SipMediaBridge] Error updating call/campaign records:`, err);
             }
 
             // 6. Hangup SIP call if still connected
@@ -350,51 +383,58 @@ class SipMediaBridge {
      * Generate AI call summary and determine lead status using Gemini
      */
     async generateCallSummary(conversationLog) {
-        const userMessages = conversationLog.filter(m => m.role === 'user');
-        const assistantMessages = conversationLog.filter(m => m.role === 'assistant');
-
-        if (userMessages.length === 0 && assistantMessages.length === 0) {
-            return { summary: 'No conversation recorded', leadStatus: 'unknown' };
+        if (!conversationLog || conversationLog.length === 0) {
+            return { summary: 'No conversation recorded', leadStatus: 'unknown', leadType: 'Cold', leadProfile: 'Unknown' };
         }
 
         try {
-            const { GoogleGenerativeAI } = require('@google/generative-ai');
-            const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-            const model = genAI.getGenerativeModel({
-                model: 'gemini-2.5-flash',
-                generationConfig: {
-                    responseMimeType: 'application/json'
-                }
-            });
-
+            // Use the analyzeConversation method from GeminiService (already accessible via orchestrator.gemini)
+            // Or create a local orchestrator if we don't have one (though we usually do here)
             const transcriptText = conversationLog
                 .map(m => `${m.role === 'user' ? 'Customer' : 'AI Agent'}: ${m.content}`)
                 .join('\n');
 
-            const result = await model.generateContent(
-                `Analyze this phone call conversation. Return a JSON object with two fields:
-1. "summary": A 2-3 sentence concise summary of the call, focusing on key topics, decisions, and outcomes.
-2. "leadStatus": Classify the customer's interest level into ONE of these exact string values: "interested", "not-interested", "follow-up", "not-applicable", or "unknown".
+            const result = await this.recordingService.gemini?.analyzeConversation(conversationLog) || 
+                          await this._getStandaloneAnalysis(conversationLog);
 
-Conversation Transcript:
-${transcriptText}`
-            );
-
-            const responseText = result.response.text();
-            const parsed = JSON.parse(responseText);
-
-            console.log('[SipMediaBridge] AI Call Info generated:', parsed);
+            console.log('[SipMediaBridge] AI Call Analysis generated:', result);
             return {
-                summary: parsed.summary || 'Summary unavailable',
-                leadStatus: parsed.leadStatus || 'unknown'
+                summary: result.summary || 'Summary unavailable',
+                leadStatus: (result.statusClassification || 'unknown').toLowerCase(),
+                leadType: result.leadType || 'unknown',
+                leadProfile: result.leadProfile || 'unknown',
+                statusClassification: result.statusClassification || 'unknown'
             };
         } catch (err) {
             console.error('[SipMediaBridge] Failed to generate AI summary:', err.message);
             return {
-                summary: `Conversation with ${userMessages.length} customer messages and ${assistantMessages.length} agent responses.`,
-                leadStatus: 'unknown'
+                summary: 'Analysis failed',
+                leadStatus: 'unknown',
+                leadType: 'Unknown',
+                leadProfile: 'Unknown'
             };
         }
+    }
+
+    async _getStandaloneAnalysis(history) {
+        const { GoogleGenerativeAI } = require('@google/generative-ai');
+        const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+        
+        const transcript = history.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n');
+        const prompt = `
+            Analyze this phone call transcript. Return ONLY a JSON object with:
+            "leadType": "Hot", "Warm", or "Cold".
+            "leadProfile": Professions or demographic (e.g. "Doctor").
+            "statusClassification": "Interested", "Not Interested", "Follow-up", etc.
+            "summary": 1-sentence recap.
+            
+            Transcript:
+            ${transcript}
+        `;
+        const result = await model.generateContent(prompt);
+        const text = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
+        return JSON.parse(text);
     }
 
     /**

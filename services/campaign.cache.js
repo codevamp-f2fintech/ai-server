@@ -1,33 +1,44 @@
-const crypto = require('crypto');
-
-// In-Memory map to hold campaign leads.
-// Key: campaignId (string) -> Value: Array of lead objects
-const memoryCache = new Map();
+const CampaignLead = require('../models/CampaignLead');
 
 /**
- * Initialize a campaign queue in memory.
+ * Initialize a campaign queue in MongoDB.
  * @param {string} campaignId 
+ * @param {string} userId
  * @param {Array} leads - Array of {to, name, variables}
  */
-const initCampaign = (campaignId, leads) => {
-    const queue = leads.map(l => ({
-        _id: crypto.randomUUID(), // for React list keys
+const initCampaign = async (campaignId, userId, leads) => {
+    const bulkLeads = leads.map(l => ({
+        campaignId,
+        userId,
         to: l.to,
         name: l.name || '',
         variables: l.variables || {},
-        status: 'pending',
-        callSid: null,
-        errorMessage: null
+        status: 'pending'
     }));
-    memoryCache.set(campaignId.toString(), queue);
+
+    // Use bulkWrite for efficiency if many leads
+    if (bulkLeads.length > 0) {
+        await CampaignLead.insertMany(bulkLeads);
+    }
 };
 
 /**
  * Get all leads for a campaign.
  * @param {string} campaignId 
  */
-const getLeads = (campaignId) => {
-    return memoryCache.get(campaignId.toString()) || [];
+const getLeads = async (campaignId) => {
+    return await CampaignLead.find({ campaignId });
+};
+
+/**
+ * Get only "active" leads (calling) for a campaign.
+ * @param {string} campaignId 
+ */
+const getActiveLeads = async (campaignId) => {
+    return await CampaignLead.find({
+        campaignId,
+        status: 'calling'
+    });
 };
 
 /**
@@ -35,13 +46,11 @@ const getLeads = (campaignId) => {
  * @param {string} campaignId 
  * @param {number} limit 
  */
-const getPendingLeads = (campaignId, limit) => {
-    const queue = memoryCache.get(campaignId.toString());
-    if (!queue) return [];
-    
-    // Find all pendings
-    const pendings = queue.filter(l => l.status === 'pending');
-    return pendings.slice(0, limit);
+const getPendingLeads = async (campaignId, limit) => {
+    return await CampaignLead.find({
+        campaignId,
+        status: 'pending'
+    }).limit(limit).sort({ createdAt: 1 });
 };
 
 /**
@@ -50,22 +59,49 @@ const getPendingLeads = (campaignId, limit) => {
  * @param {string} to - The phone number
  * @param {Object} updates - { status, callSid, errorMessage }
  */
-const updateLead = (campaignId, to, updates) => {
-    const queue = memoryCache.get(campaignId.toString());
-    if (!queue) return;
-
-    const lead = queue.find(l => l.to === to);
-    if (lead) {
-        Object.assign(lead, updates);
-    }
+const updateLead = async (campaignId, to, updates) => {
+    await CampaignLead.updateOne(
+        { campaignId, to },
+        { 
+            $set: updates,
+            $set: { lastCalledAt: new Date(), ...updates }
+        }
+    );
 };
 
 /**
- * Delete a campaign from RAM to free up memory.
+ * Update the status of a specific lead by ID.
+ */
+const updateLeadById = async (leadId, updates) => {
+    await CampaignLead.findByIdAndUpdate(leadId, updates);
+};
+
+/**
+ * Find all leads with status 'calling' and reset to 'pending'
+ * (Call this at server start to resume interrupted campaigns)
+ */
+const rescueHangingLeads = async () => {
+    const result = await CampaignLead.updateMany(
+        { status: 'calling' },
+        { 
+            $set: { 
+                status: 'pending',
+                errorMessage: 'interrupted_by_server_restart'
+            }
+        }
+    );
+    if (result.modifiedCount > 0) {
+        console.log(`[CampaignCache] Rescued ${result.modifiedCount} hanging leads from 'calling' to 'pending'`);
+    }
+    return result.modifiedCount;
+};
+
+/**
+ * Delete a campaign's leads from database.
  * @param {string} campaignId 
  */
-const deleteCampaign = (campaignId) => {
-    memoryCache.delete(campaignId.toString());
+const deleteCampaign = async (campaignId) => {
+    await CampaignLead.deleteMany({ campaignId });
 };
 
 module.exports = {
@@ -73,5 +109,8 @@ module.exports = {
     getLeads,
     getPendingLeads,
     updateLead,
+    updateLeadById,
+    getActiveLeads,
+    rescueHangingLeads,
     deleteCampaign
 };

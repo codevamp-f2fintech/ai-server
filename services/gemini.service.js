@@ -301,6 +301,49 @@ class GeminiService {
             console.log('[Gemini] Conversation summarized');
         }
     }
+
+    /**
+     * Analyze full conversation to extract Lead Type, Profile, and Status
+     * @param {Array} history - Full conversation history
+     * @returns {Promise<Object>} - { leadType, leadProfile, status, summary }
+     */
+    async analyzeConversation(history) {
+        try {
+            if (!history || history.length === 0) {
+                return { leadType: 'Cold', leadProfile: 'Unknown', status: 'Failed', summary: 'No conversation' };
+            }
+
+            const transcript = history.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n');
+            const prompt = `
+                Analyze the following phone conversation transcript between an AI Agent and a Customer.
+                Extract the following information in JSON format:
+                1. "leadType": Categorize as "Hot" (very interested/ready), "Warm" (interested but has questions/needs follow-up), or "Cold" (not interested/wrong number).
+                2. "leadProfile": Identify the customer's profession, role, or key demographic mentioned (e.g. "Doctor", "Business Owner", "Student", "Homeowner"). If unknown, use "Unknown".
+                3. "statusClassification": One-word status like "Interested", "Not Interested", "Follow-up", "Busy", "Disconnected".
+                4. "summary": A brief 1-sentence summary of the call.
+
+                Transcript:
+                ${transcript}
+
+                Return ONLY the JSON object.
+            `;
+
+            const result = await this.model.generateContent(prompt);
+            const responseText = result.response.text().trim();
+            
+            // Clean JSON response (handle markdown blocks if any)
+            const jsonStr = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            console.error('[Gemini] Analysis error:', error);
+            return { 
+                leadType: 'Unknown', 
+                leadProfile: 'Unknown', 
+                statusClassification: 'Error', 
+                summary: 'Analysis failed' 
+            };
+        }
+    }
 }
 
 module.exports = GeminiService;
