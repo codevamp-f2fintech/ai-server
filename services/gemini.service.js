@@ -137,6 +137,10 @@ class GeminiService {
             console.log('[Gemini] Enforcing Devanagari script for Hindi language');
         }
 
+        // Add latency-optimization prompt
+        systemPrompt += `\n\n[CONVERSATIONAL STYLE - CRITICAL FOR LOW LATENCY]\n- Keep sentences short, punchy, and direct.\n- Use simple, natural language as if speaking on the phone.\n- Avoid long, complex explanations. Aim for 1-2 short sentences per turn unless a longer explanation is explicitly requested.\n- Always end with a short, easy-to-answer follow-up question to keep the lead engaged.`;
+        console.log('[Gemini] Latency-optimization prompt added');
+
         // Determine output token limit (Devanagari uses ~3-4x more tokens than English)
         const maxOutputTokens = config.maxTokens || 2048;
 

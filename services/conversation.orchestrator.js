@@ -317,15 +317,14 @@ class ConversationOrchestrator extends EventEmitter {
             let isFirstSentence = true;
             let geminiFirstTokenAt = 0;
 
-            // Sequential chain of TTS promises — sentences play in order
-            // but Gemini generation overlaps with TTS playback of earlier sentences
+            // Sequential chain of TTS playback promises — ensures sentences play in order
+            // while Gemini generation and TTS requests overlap in parallel.
             let ttsChain = Promise.resolve();
 
             // TTS merge buffer: accumulate short sentences to reduce API round-trips.
-            // Each ElevenLabs/Chatterbox call has ~500ms TTFA overhead, so we merge sentences
-            // until we have ≥20 chars before firing TTS.
+            // Reduced to 12 chars to trigger initial speech even faster.
             let ttsMergeBuf = '';
-            const MIN_TTS_CHARS = 20;
+            const MIN_TTS_CHARS = 12;
 
             // Fire accumulated text as TTS
             const _fireTTS = (text) => {
@@ -341,8 +340,53 @@ class ConversationOrchestrator extends EventEmitter {
                 const capturedIsFirst = isFirstSentence;
                 isFirstSentence = false;
 
-                console.log(`[Orchestrator] → TTS: ${text.substring(0, 80)}`);
+                console.log(`[Orchestrator] → TTS (parallel start): ${text.substring(0, 80)}`);
 
+                // START TTS REQUEST IMMEDIATELY - DO NOT AWAIT
+                // We buffer chunks locally until this sentence's turn in the playback chain
+                const sentenceChunks = [];
+                let streamDone = false;
+                let activeOutputCallback = null;
+
+                const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
+                const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
+                const ttsStart = Date.now();
+
+                // TTS background worker
+                const ttsReqPromise = (async () => {
+                    try {
+                        let finalText = text;
+                        if (langCode === 'hi' && this.tts instanceof ChatterboxService && /[a-zA-Z]/.test(finalText)) {
+                            finalText = await this.gemini.transliterateToHindi(finalText);
+                        }
+
+                        let firstByteLogged = false;
+                        await this.tts.textToSpeechStream(
+                            finalText,
+                            { ...this.agentConfig.voice, language: this.agentConfig.voice?.language || langCode },
+                            (chunk) => {
+                                if (!firstByteLogged) {
+                                    firstByteLogged = true;
+                                    console.log(`[⏱ LATENCY] TTS first audio byte: ${Date.now() - ttsStart}ms (${providerLabel} TTFA)`);
+                                }
+                                
+                                if (activeOutputCallback) {
+                                    activeOutputCallback(chunk);
+                                } else {
+                                    sentenceChunks.push(chunk);
+                                }
+                            }
+                        );
+                        streamDone = true;
+                        if (activeOutputCallback) activeOutputCallback(null); // Signal end to chain
+                    } catch (err) {
+                        console.error(`[Orchestrator] Parallel TTS error for "${text.substring(0, 20)}...":`, err.message);
+                        streamDone = true;
+                        if (activeOutputCallback) activeOutputCallback(null);
+                    }
+                })();
+
+                // Link this sentence to the sequential playback chain
                 ttsChain = ttsChain.then(async () => {
                     if (this._aborted || this._bargeInTriggered) return;
 
@@ -350,40 +394,29 @@ class ConversationOrchestrator extends EventEmitter {
                         this.deepgram.clearBuffer();
                     }
 
-                    try {
-                        const ttsStart = Date.now();
-                        let firstChunk = true;
-                        const providerLabel = this.tts instanceof ChatterboxService ? 'Chatterbox' : 'ElevenLabs';
-                        const langCode = (this.agentConfig.transcriber?.language || 'en').substring(0, 2).toLowerCase();
+                    // 1. Drain already buffered chunks
+                    while (sentenceChunks.length > 0) {
+                        if (this._aborted || this._bargeInTriggered) break;
+                        this.onAudioChunk(sentenceChunks.shift());
+                    }
 
-                        let finalText = text;
-                        if (langCode === 'hi' && this.tts instanceof ChatterboxService && /[a-zA-Z]/.test(finalText)) {
-                            console.log('[Orchestrator] English characters detected in chunk, transliterating...');
-                            finalText = await this.gemini.transliterateToHindi(finalText);
-                            console.log(`[Orchestrator] Transliterated chunk to: ${finalText}`);
-                        }
-
-                        await this.tts.textToSpeechStream(
-                            finalText,
-                            { ...this.agentConfig.voice, language: this.agentConfig.voice?.language || langCode },
-                            (chunk) => {
-                                if (firstChunk) {
-                                    firstChunk = false;
-                                    console.log(`[⏱ LATENCY] TTS first audio byte: ${Date.now() - ttsStart}ms (${providerLabel} TTFA)`);
-                                    if (this._transcriptReceivedAt) {
-                                        console.log(`[⏱ LATENCY] *** TOTAL E2E (transcript→first audio): ${Date.now() - this._transcriptReceivedAt}ms ***`);
+                    // 2. If TTS stream is still running, pipe incoming chunks directly to output
+                    if (!streamDone && !this._aborted && !this._bargeInTriggered) {
+                        await new Promise(resolve => {
+                            activeOutputCallback = (chunk) => {
+                                if (chunk === null) {
+                                    resolve();
+                                } else {
+                                    if (!this._aborted && !this._bargeInTriggered) {
+                                        this.onAudioChunk(chunk);
                                     }
                                 }
-                                this.onAudioChunk(chunk);
-                            }
-                        );
-                        console.log(`[⏱ LATENCY] TTS done: ${Date.now() - ttsStart}ms`);
-                        if (!this._aborted) this.emit('audio_flush');
-                    } catch (ttsError) {
-                        if (!this._aborted) {
-                            console.error('[Orchestrator] TTS error:', ttsError.message);
-                        }
+                            };
+                        });
                     }
+
+                    console.log(`[⏱ LATENCY] Sentence playback delivered: ${text.substring(0, 30)}...`);
+                    if (!this._aborted) this.emit('audio_flush');
                 });
             };
 
@@ -421,17 +454,25 @@ class ConversationOrchestrator extends EventEmitter {
             const extractSentences = () => {
                 if (isChatterbox) return; // For Chatterbox, accumulate entire response
 
-                // Match punctuation + following whitespace (consume the whitespace as separator)
+                // Match punctuation + following whitespace OR end of string if very long
+                // This ensures we don't wait too long for punctuation if the AI is verbose.
                 const parts = sentenceBuffer.split(/(?<=[.!?।])\s+/);
+                
                 if (parts.length > 1) {
-                    // All parts except the last are complete sentences
                     const completeSentences = parts.slice(0, -1);
-                    sentenceBuffer = parts[parts.length - 1]; // remainder (may be partial)
+                    sentenceBuffer = parts[parts.length - 1]; 
                     for (const s of completeSentences) {
                         enqueueSentence(s);
                     }
+                } else if (sentenceBuffer.length > 120) {
+                    // Safety split for very long segments without punctuation
+                    const lastSpaceIndex = sentenceBuffer.lastIndexOf(' ');
+                    if (lastSpaceIndex > 60) {
+                        const s = sentenceBuffer.substring(0, lastSpaceIndex).trim();
+                        sentenceBuffer = sentenceBuffer.substring(lastSpaceIndex).trim();
+                        enqueueSentence(s);
+                    }
                 }
-                // If length === 1, no boundary found yet — keep accumulating
             };
 
             // Stream from Gemini, detecting sentence boundaries in real-time
