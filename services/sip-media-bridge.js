@@ -290,7 +290,20 @@ class SipMediaBridge {
                 session.sipService.removeListener('playback_complete', session.playbackCompleteHandler);
             }
 
-            // 3. Stop recording and upload to S3
+            // --- HANGUP FIRST (before any slow async ops) ---
+            // Send SIP BYE immediately so the call line is released right away.
+            // The recording upload and AI summary happen AFTER the call is hung up.
+            try {
+                if (session.sipService && reason !== 'call_ended') {
+                    console.log(`[SipMediaBridge] Sending SIP BYE immediately (reason: ${reason})`);
+                    await session.sipService.hangup(session.sipCallId);
+                    console.log(`[SipMediaBridge] SIP BYE sent for ${internalCallId}`);
+                }
+            } catch (err) {
+                console.error(`[SipMediaBridge] Error hanging up SIP:`, err);
+            }
+
+            // 3. Stop recording (but don't block the cleanup on S3 upload)
             let recordingUrl = null;
             try {
                 recordingUrl = await this.recordingService.stopAndUpload(internalCallId);
@@ -303,9 +316,8 @@ class SipMediaBridge {
             const duration = (Date.now() - session.startTime) / 1000;
             const conversationLog = session.orchestrator?.getConversationLog() || [];
 
-            // 5. Update Call record in database
+            // 5. Update Call record in database (AI summary + DB update)
             try {
-                // Generate AI summary and lead status using Gemini
                 const callInfo = await this.generateCallSummary(conversationLog);
 
                 await Call.findByIdAndUpdate(
@@ -329,15 +341,19 @@ class SipMediaBridge {
                 if (callRecord && callRecord.campaignName) {
                     console.log(`[SipMediaBridge] Updating CampaignLead for campaign: ${callRecord.campaignName}`);
                     
-                    // Update campaign stats
-                    if (callInfo.leadStatus === 'interested') {
-                        await Campaign.updateOne({ name: callRecord.campaignName, userId: callRecord.userId }, { $inc: { completedLeads: 1 } });
-                    }
+                    // Find the campaign
+                    const campaignIds = await Campaign.find({ name: callRecord.campaignName, userId: callRecord.userId }).distinct('_id');
+
+                    // Always increment completedLeads for every call that finishes
+                    await Campaign.updateOne(
+                        { name: callRecord.campaignName, userId: callRecord.userId },
+                        { $inc: { completedLeads: 1 } }
+                    );
 
                     // Update the specific lead record
                     await CampaignLead.updateOne(
                         { 
-                            campaignId: { $in: await Campaign.find({ name: callRecord.campaignName, userId: callRecord.userId }).distinct('_id') },
+                            campaignId: { $in: campaignIds },
                             to: callRecord.customer.number,
                             status: 'calling'
                         },
@@ -356,15 +372,6 @@ class SipMediaBridge {
                 }
             } catch (err) {
                 console.error(`[SipMediaBridge] Error updating call/campaign records:`, err);
-            }
-
-            // 6. Hangup SIP call if still connected
-            try {
-                if (session.sipService && reason !== 'call_ended') {
-                    await session.sipService.hangup(session.sipCallId);
-                }
-            } catch (err) {
-                console.error(`[SipMediaBridge] Error hanging up SIP:`, err);
             }
 
             // 7. Cleanup session

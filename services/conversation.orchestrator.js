@@ -135,6 +135,23 @@ class ConversationOrchestrator extends EventEmitter {
             });
 
             await this.speak(this.agentConfig.firstMessage);
+
+            // ---------------------------------------------------------------
+            // VOICEMAIL DETECTION
+            // After speaking the first message, wait up to 8 seconds for the
+            // human to respond (send back any audio). If we receive zero bytes
+            // of inbound audio during that window, the call was forwarded to
+            // voicemail (or an IVR picked up) and we should hang up immediately.
+            // ---------------------------------------------------------------
+            if (!this._aborted && !this._receivedCallerAudio) {
+                console.log('[Orchestrator] Voicemail check: waiting up to 8s for caller audio...');
+                this._voicemailTimer = setTimeout(() => {
+                    if (!this._receivedCallerAudio && !this._aborted) {
+                        console.log('[Orchestrator] ⚠️ No caller audio detected after first message — likely voicemail. Hanging up.');
+                        this.end('voicemail');
+                    }
+                }, 8000);
+            }
         } else {
             this.state = 'listening';
             this.startSilenceTimer();
@@ -712,6 +729,21 @@ class ConversationOrchestrator extends EventEmitter {
      * Process incoming audio from phone call
      */
     processIncomingAudio(audioBuffer) {
+        // Track that we received caller audio (used for voicemail detection)
+        if (!this._receivedCallerAudio) {
+            // Only count non-silent packets. RTP silence = 160 bytes of 0xFF (μ-law silence)
+            // We check if at least some bytes differ from the silence value
+            const isSilence = audioBuffer.every(b => b === 0xFF || b === 0x7F);
+            if (!isSilence) {
+                this._receivedCallerAudio = true;
+                if (this._voicemailTimer) {
+                    clearTimeout(this._voicemailTimer);
+                    this._voicemailTimer = null;
+                    console.log('[Orchestrator] Caller audio detected — voicemail timer cancelled');
+                }
+            }
+        }
+
         // Log state occasionally for debugging
         if (!this._audioLogCount) this._audioLogCount = 0;
         this._audioLogCount++;
@@ -770,6 +802,12 @@ class ConversationOrchestrator extends EventEmitter {
 
         this.state = 'ended';
         this._aborted = true; // Hard stop - all async pipeline checks this
+
+        // Clear voicemail detection timer
+        if (this._voicemailTimer) {
+            clearTimeout(this._voicemailTimer);
+            this._voicemailTimer = null;
+        }
 
         // Clear timers
         this.clearSilenceTimer();

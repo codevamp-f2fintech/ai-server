@@ -59,7 +59,7 @@ router.get('/:id', authenticate, async (req, res) => {
         const recentLeads = await CampaignLead.find({ 
             campaignId: req.params.id,
             status: { $in: ['completed', 'failed'] }
-        }).sort({ updatedAt: -1 }).limit(10); // Show last 10 finished calls in the queue UI
+        }).sort({ updatedAt: -1 }); // All finished calls, newest first
         
         // Return activeLeads as 'leads' for backward compatibility with the frontend table
         res.json({
