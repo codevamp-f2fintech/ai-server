@@ -7,6 +7,17 @@ const { Readable } = require("stream");
 // V3 model IDs - these do NOT support voice_settings (stability, speed, similarity)
 const V3_MODELS = ['eleven_v3', 'eleven_ttv_v3'];
 
+// Flash/Turbo model IDs - optimized for real-time streaming with ultra-low latency
+const FLASH_MODELS = ['eleven_flash_v2_5', 'eleven_flash_v2', 'eleven_turbo_v2_5', 'eleven_turbo_v2'];
+
+/**
+ * Check if a model supports optimize_streaming_latency
+ * Flash/Turbo models support this parameter; v3 does not.
+ */
+function supportsLatencyOptimization(modelId) {
+    return FLASH_MODELS.includes(modelId);
+}
+
 /**
  * Check if a model ID is a v3 model
  * @param {string} modelId
@@ -43,15 +54,20 @@ class ElevenLabsService {
             console.log(`[ElevenLabs] Converting to speech: ${text.substring(0, 50)}...`);
             console.log(`[ElevenLabs] Using voice ID: ${voiceId}`);
 
-            // Use configured model or default to eleven_v3 (highest quality, real-time streaming)
-            const modelId = config.model || 'eleven_v3';
+            // Use configured model or default to eleven_flash_v2_5 (ultra-low latency for real-time voice agents)
+            // eleven_flash_v2_5: ~75-150ms TTFA (vs ~650ms for eleven_v3)
+            // eleven_v3 is studio quality but NOT suitable for real-time calls
+            const modelId = config.model || 'eleven_flash_v2_5';
             const isV3 = isV3Model(modelId);
 
             // Build TTS request body
             const requestBody = {
                 text,
                 model_id: modelId,
-                output_format: 'ulaw_8000' // μ-law 8kHz - standard telephony format
+                output_format: 'ulaw_8000', // μ-law 8kHz - standard telephony format
+                // optimize_streaming_latency: 4 = maximum latency reduction
+                // (only supported by Flash/Turbo models)
+                ...(supportsLatencyOptimization(modelId) ? { optimize_streaming_latency: 4 } : {})
             };
 
             // V3 models do NOT support voice_settings (stability, speed, similarity)

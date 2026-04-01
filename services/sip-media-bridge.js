@@ -35,6 +35,14 @@ class SipMediaBridge {
             const cfg = agent.configuration || {};
             const transcriberConfig = { ...(cfg.transcriber || {}) };
 
+            // Build voice config with latency-optimized model
+            // Auto-upgrade eleven_v3 to eleven_flash_v2_5 — v3 is NOT suitable for real-time calls
+            // (~650ms TTFA vs ~75-150ms for flash). Existing DB agents still have eleven_v3.
+            const voiceCfg = { ...(cfg.voice || {}) };
+            if (!voiceCfg.model || voiceCfg.model === 'eleven_v3' || voiceCfg.model === 'eleven_ttv_v3') {
+                voiceCfg.model = 'eleven_flash_v2_5';
+            }
+
             // Apply {{variable}} substitution to firstMessage
             let firstMessage = cfg.firstMessage || 'Hello! How can I help you today?';
             if (variables && typeof variables === 'object') {
@@ -51,14 +59,14 @@ class SipMediaBridge {
             const orchestrator = new ConversationOrchestrator(
                 {
                     model: cfg.model || {},
-                    voice: cfg.voice || {},
+                    voice: voiceCfg,                           // ← latency-optimized (flash model)
                     transcriber: transcriberConfig,
                     knowledgeBase: cfg.knowledgeBase || [],   // ← KB text for Gemini injection
                     firstMessage,
                     firstMessageMode: cfg.firstMessageMode || 'assistant-speaks-first',
                     maxDurationSeconds: cfg.maxDurationSeconds || 600,
                     silenceTimeoutSeconds: cfg.silenceTimeoutSeconds || 30,
-                    responseDelaySeconds: cfg.responseDelaySeconds ?? 0.1
+                    responseDelaySeconds: cfg.responseDelaySeconds ?? 0  // 0ms default — no artificial delay
                 },
                 apiKeys
             );

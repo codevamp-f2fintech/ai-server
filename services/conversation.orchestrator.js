@@ -53,7 +53,7 @@ class ConversationOrchestrator extends EventEmitter {
         if (!this.agentConfig.firstMessageMode) this.agentConfig.firstMessageMode = 'assistant-speaks-first';
         if (!this.agentConfig.maxDurationSeconds) this.agentConfig.maxDurationSeconds = 600;
         if (!this.agentConfig.silenceTimeoutSeconds) this.agentConfig.silenceTimeoutSeconds = 30;
-        if (!this.agentConfig.responseDelaySeconds) this.agentConfig.responseDelaySeconds = 0.1;
+        if (!this.agentConfig.responseDelaySeconds) this.agentConfig.responseDelaySeconds = 0; // No artificial delay
 
         console.log('[Orchestrator] Agent config loaded:');
         console.log('  - Voice ID:', this.agentConfig.voice?.voiceId || 'MISSING - will use default');
@@ -224,7 +224,8 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Wait 100ms for more transcript finals before processing
+        // NO accumulation delay — speech_final already ensures utterance is complete.
+        // Fire Gemini immediately to start streaming the response ASAP.
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -255,10 +256,10 @@ class ConversationOrchestrator extends EventEmitter {
             // during the response delay below
             this._isThinking = true;
 
-            // Apply configured response delay (cap at 100ms to reduce latency)
-            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 100);
+            // Apply configured response delay — set to 0 by default to minimize latency
+            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 50);
             if (delayMs > 0) await this.delay(delayMs);
-            console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
+            if (delayMs > 0) console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
 
             // Check again after delay - call may have ended during wait
             if (this._aborted) {
@@ -285,7 +286,7 @@ class ConversationOrchestrator extends EventEmitter {
                 });
                 await this.getAIResponse(combinedTranscript);
             }
-        }, 100);
+        }, 0); // 0ms — speech_final already guarantees utterance is complete, no need to wait
     }
 
     /**
@@ -322,10 +323,10 @@ class ConversationOrchestrator extends EventEmitter {
             let ttsChain = Promise.resolve();
 
             // TTS merge buffer: accumulate short sentences to reduce API round-trips.
-            // Each ElevenLabs/Chatterbox call has ~500ms TTFA overhead, so we merge sentences
-            // until we have ≥20 chars before firing TTS.
+            // Each ElevenLabs/Chatterbox call has latency overhead, so we merge sentences
+            // until we have ≥40 chars before firing TTS. Higher threshold = fewer calls = lower total latency.
             let ttsMergeBuf = '';
-            const MIN_TTS_CHARS = 20;
+            const MIN_TTS_CHARS = 40;
 
             // Fire accumulated text as TTS
             const _fireTTS = (text) => {
