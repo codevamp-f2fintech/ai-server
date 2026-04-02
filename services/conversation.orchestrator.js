@@ -286,8 +286,9 @@ class ConversationOrchestrator extends EventEmitter {
             // during the response delay below
             this._isThinking = true;
 
-            // Apply configured response delay (skip entirely if 0 or very low)
-            const delayMs = Math.round((this.agentConfig.responseDelaySeconds || 0) * 1000);
+            // Cap response delay at 100ms regardless of DB config
+            // (DB had 0.4s = 400ms which added unnecessary per-turn overhead)
+            const delayMs = Math.min(Math.round((this.agentConfig.responseDelaySeconds || 0) * 1000), 100);
             if (delayMs > 0) await this.delay(delayMs);
             console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
 
@@ -530,7 +531,11 @@ class ConversationOrchestrator extends EventEmitter {
                 console.log(`[Orchestrator] Aborting stale response — new user speech arrived during thinking`);
                 this._abortCurrentResponse = false;
                 this._isThinking = false;
-                // Don't speak anything — the caller will process the queued transcript next
+                // Stop any TTS stream that may have started for the stale response
+                if (this.tts) this.tts.stop();
+                // Clear any stale audio already queued in the RTP buffer
+                // so user doesn't hear partial stale response before the real one
+                this.emit('barge_in');
                 return;
             }
 
