@@ -98,11 +98,11 @@ class RecordingService {
 
             console.log(`[RecordingService] Caller audio: ${callerBuffer.length} bytes, Agent audio: ${agentBuffer.length} bytes`);
 
-            // Create mixed audio (interleave caller and agent)
-            const mixedBuffer = this.mixAudio(callerBuffer, agentBuffer);
+            // Decode and mix μ-law audio from both channels into PCM
+            const pcmBuffer = this.mixAudioToPcm(callerBuffer, agentBuffer);
 
-            // Convert μ-law to WAV format for playback
-            const wavBuffer = this.createWavFile(mixedBuffer, 8000, 1);
+            // Wrap as standard 16-bit PCM WAV (universally playable)
+            const wavBuffer = this.createWavFile(pcmBuffer, 8000, 1);
 
             // Generate S3 key
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -141,104 +141,92 @@ class RecordingService {
     }
 
     /**
-     * Mix two audio buffers (simple averaging)
-     * Both buffers should be μ-law 8kHz mono
+     * Mix two μ-law audio buffers into a single PCM Int16 array.
+     * Both buffers must be μ-law 8 kHz mono.
+     * Returns a Buffer containing raw signed 16-bit little-endian PCM samples.
      */
-    mixAudio(buffer1, buffer2) {
-        // Pad shorter buffer with silence (0x7F is μ-law silence)
+    mixAudioToPcm(buffer1, buffer2) {
+        // μ-law silence byte is 0xFF (not 0x7F — 0x7F is a large mid-scale value)
+        const MULAW_SILENCE = 0xFF;
         const maxLength = Math.max(buffer1.length, buffer2.length);
-        const mixed = Buffer.alloc(maxLength);
+        // Each μ-law byte → one Int16 PCM sample → 2 bytes in output
+        const pcmOut = Buffer.alloc(maxLength * 2);
 
         for (let i = 0; i < maxLength; i++) {
-            const sample1 = i < buffer1.length ? buffer1[i] : 0x7F;
-            const sample2 = i < buffer2.length ? buffer2[i] : 0x7F;
+            const mu1 = i < buffer1.length ? buffer1[i] : MULAW_SILENCE;
+            const mu2 = i < buffer2.length ? buffer2[i] : MULAW_SILENCE;
 
-            // Convert μ-law to linear, mix, convert back
-            const linear1 = this.mulawToLinear(sample1);
-            const linear2 = this.mulawToLinear(sample2);
+            // Decode both channels to linear PCM
+            const lin1 = this.mulawToLinear(mu1);
+            const lin2 = this.mulawToLinear(mu2);
 
-            // Mix with 50% each (simple average)
-            const mixedLinear = Math.round((linear1 + linear2) / 2);
+            // Sum and clamp to Int16 range to avoid overflow/clipping noise
+            let mixed = lin1 + lin2;
+            if (mixed > 32767)  mixed = 32767;
+            if (mixed < -32768) mixed = -32768;
 
-            // Convert back to μ-law
-            mixed[i] = this.linearToMulaw(mixedLinear);
+            pcmOut.writeInt16LE(mixed, i * 2);
         }
 
-        return mixed;
+        return pcmOut;
     }
 
     /**
-     * Create WAV file from μ-law audio
-     * @param {Buffer} audioData - μ-law audio data
-     * @param {number} sampleRate - Sample rate (8000)
-     * @param {number} channels - Number of channels (1 for mono)
-     * @returns {Buffer} - WAV file buffer
+     * Create a standard 16-bit PCM WAV file.
+     * Using PCM (format tag 1) instead of μ-law (format 7) ensures
+     * every media player, browser, and AWS service decodes it correctly
+     * without needing a μ-law codec — eliminating a major source of noise.
+     *
+     * @param {Buffer} pcmData   - Signed 16-bit little-endian PCM samples
+     * @param {number} sampleRate - e.g. 8000
+     * @param {number} channels   - 1 for mono
+     * @returns {Buffer} Complete WAV file
      */
-    createWavFile(audioData, sampleRate, channels) {
-        // WAV header for μ-law format
-        const header = Buffer.alloc(44);
-        const dataSize = audioData.length;
+    createWavFile(pcmData, sampleRate, channels) {
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * channels * (bitsPerSample / 8);
+        const blockAlign = channels * (bitsPerSample / 8);
+        const dataSize = pcmData.length;
         const fileSize = 36 + dataSize;
 
-        // RIFF header
+        const header = Buffer.alloc(44);
+
+        // RIFF chunk
         header.write('RIFF', 0);
         header.writeUInt32LE(fileSize, 4);
         header.write('WAVE', 8);
 
-        // fmt chunk
+        // fmt sub-chunk
         header.write('fmt ', 12);
-        header.writeUInt32LE(16, 16);           // Chunk size
-        header.writeUInt16LE(7, 20);            // Audio format (7 = μ-law)
-        header.writeUInt16LE(channels, 22);     // Channels
-        header.writeUInt32LE(sampleRate, 24);   // Sample rate
-        header.writeUInt32LE(sampleRate * channels, 28); // Byte rate
-        header.writeUInt16LE(channels, 32);     // Block align
-        header.writeUInt16LE(8, 34);            // Bits per sample
+        header.writeUInt32LE(16, 16);                // fmt chunk size (16 for PCM)
+        header.writeUInt16LE(1, 20);                 // AudioFormat = 1 (PCM)
+        header.writeUInt16LE(channels, 22);          // NumChannels
+        header.writeUInt32LE(sampleRate, 24);        // SampleRate
+        header.writeUInt32LE(byteRate, 28);          // ByteRate
+        header.writeUInt16LE(blockAlign, 32);        // BlockAlign
+        header.writeUInt16LE(bitsPerSample, 34);     // BitsPerSample
 
-        // data chunk
+        // data sub-chunk
         header.write('data', 36);
         header.writeUInt32LE(dataSize, 40);
 
-        return Buffer.concat([header, audioData]);
+        return Buffer.concat([header, pcmData]);
     }
 
     /**
-     * μ-law to linear PCM conversion
+     * μ-law to signed linear-16 PCM conversion (ITU G.711)
      */
     mulawToLinear(mulaw) {
         const BIAS = 0x84;
-        mulaw = ~mulaw;
+        mulaw = ~mulaw & 0xFF;
         const sign = mulaw & 0x80;
         const exponent = (mulaw >> 4) & 0x07;
         const mantissa = mulaw & 0x0F;
 
-        let sample = mantissa << (exponent + 3);
-        sample += BIAS << exponent;
-        if (exponent === 0) sample += BIAS;
+        let sample = ((mantissa << 3) + BIAS) << exponent;
+        sample -= BIAS;
 
-        return sign === 0 ? sample : -sample;
-    }
-
-    /**
-     * Linear PCM to μ-law conversion
-     */
-    linearToMulaw(sample) {
-        const BIAS = 0x84;
-        const CLIP = 32635;
-        const TABLE = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
-            4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4];
-
-        const sign = sample < 0 ? 0x80 : 0;
-        sample = Math.abs(sample);
-
-        if (sample > CLIP) sample = CLIP;
-        sample = sample + BIAS;
-
-        const exponent = TABLE[(sample >> 7) & 0xFF] || 0;
-        const mantissa = (sample >> (exponent + 3)) & 0x0F;
-        const mulaw = ~(sign | (exponent << 4) | mantissa);
-
-        return mulaw & 0xFF;
+        return sign ? -sample : sample;
     }
 
     /**
