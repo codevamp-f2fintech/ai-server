@@ -43,8 +43,8 @@ class DeepgramService {
             encoding: config.encoding || 'mulaw',  // 'alaw' for PCMA (codec 8), 'mulaw' for PCMU (codec 0)
             sample_rate: 8000,    // 8kHz for telephony
             channels: 1,
-            endpointing: 200,     // Detect utterance end after 200ms silence (low-latency)
-            utterance_end_ms: 800, // Fire UtteranceEnd event after 800ms silence
+            endpointing: 200,      // Detect utterance end after 200ms silence (low-latency)
+            utterance_end_ms: 1000, // Minimum allowed by Deepgram API (< 1000 returns HTTP 400)
             vad_events: true,     // Get speech start/end events
         };
 
