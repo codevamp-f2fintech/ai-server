@@ -134,7 +134,11 @@ class ConversationOrchestrator extends EventEmitter {
                 timestamp: new Date()
             });
 
+            // Lock barge-in for the duration of the first message
+            this._speakingFirstMessage = true;
             await this.speak(this.agentConfig.firstMessage);
+            this._speakingFirstMessage = false;
+            console.log('[Orchestrator] First message complete — barge-in now enabled');
 
             // ---------------------------------------------------------------
             // VOICEMAIL DETECTION
@@ -176,7 +180,8 @@ class ConversationOrchestrator extends EventEmitter {
                 this.resetSilenceTimer();
 
                 // Barge-in: if user speaks while agent is speaking, stop and listen
-                if (this.state === 'speaking' && !this._bargeInTriggered) {
+                // BUT: never barge-in during the first greeting message
+                if (this.state === 'speaking' && !this._bargeInTriggered && !this._speakingFirstMessage) {
                     this._bargeInTriggered = true;
                     console.log(`[Orchestrator] Barge-in detected! User interrupted — stopping speech to listen`);
                     // Stop TTS generation
@@ -185,6 +190,8 @@ class ConversationOrchestrator extends EventEmitter {
                     this.emit('barge_in');
                     // Transition to listening
                     this.state = 'listening';
+                } else if (this.state === 'speaking' && this._speakingFirstMessage) {
+                    console.log(`[Orchestrator] Barge-in blocked — first message is protected`);
                 }
             }
         );
@@ -197,6 +204,13 @@ class ConversationOrchestrator extends EventEmitter {
      */
     async onUserSpeech(transcript) {
         if (this.state === 'ended' || this._aborted) return;
+
+        // PROTECTED FIRST MESSAGE: discard any speech received during the greeting.
+        // The user may speak, but we don't react until the first message is fully done.
+        if (this._speakingFirstMessage) {
+            console.log(`[Orchestrator] Ignoring user speech during first message (protected): "${transcript}"`);
+            return;
+        }
 
         this._transcriptReceivedAt = Date.now();
         console.log(`[⏱ LATENCY] Transcript received: "${transcript}"`);
@@ -241,7 +255,7 @@ class ConversationOrchestrator extends EventEmitter {
             clearTimeout(this._transcriptAccumTimer);
         }
 
-        // Wait 100ms for more transcript finals before processing
+        // Wait 0ms (next tick) — speech_final from Deepgram is already a complete utterance
         this._transcriptAccumTimer = setTimeout(async () => {
             if (this._aborted || this.state === 'ended') return;
 
@@ -272,8 +286,8 @@ class ConversationOrchestrator extends EventEmitter {
             // during the response delay below
             this._isThinking = true;
 
-            // Apply configured response delay (cap at 100ms to reduce latency)
-            const delayMs = Math.min((this.agentConfig.responseDelaySeconds || 0) * 1000, 100);
+            // Apply configured response delay (skip entirely if 0 or very low)
+            const delayMs = Math.round((this.agentConfig.responseDelaySeconds || 0) * 1000);
             if (delayMs > 0) await this.delay(delayMs);
             console.log(`[⏱ LATENCY] Response delay done: +${delayMs}ms`);
 
@@ -302,7 +316,7 @@ class ConversationOrchestrator extends EventEmitter {
                 });
                 await this.getAIResponse(combinedTranscript);
             }
-        }, 50);
+        }, 0);
     }
 
     /**
