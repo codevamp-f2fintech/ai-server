@@ -245,6 +245,26 @@ app.get('/calls/list', authenticate, async (req, res) => {
   }
 });
 
+// SECURED: Bulk delete calls
+app.post('/calls/bulk-delete', authenticate, async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'Invalid or empty ids array' });
+    }
+
+    const result = await Call.deleteMany({
+      _id: { $in: ids },
+      userId: req.userId // Ensure user owns the calls being deleted
+    });
+
+    res.status(200).json({ success: true, deletedCount: result.deletedCount });
+  } catch (err) {
+    console.error('Failed to bulk delete calls', err);
+    res.status(500).json({ error: 'Failed to delete calls' });
+  }
+});
+
 // SECURED: Get interested/follow-up leads
 app.get('/leads/list', authenticate, async (req, res) => {
   try {
