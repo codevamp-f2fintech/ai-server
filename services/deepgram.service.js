@@ -15,14 +15,12 @@ class DeepgramService {
         // Utterance assembly: track interims and use fallback if no final arrives
         this._lastInterimTranscript = '';
         this._interimTimer = null;
-        // NOTE: Keep this HIGH for Hindi — users pause naturally mid-sentence.
-        // 1000ms was too short: interim fired before speech_final, causing stale AI responses.
-        this._INTERIM_FALLBACK_MS = 2500;
+        this._INTERIM_FALLBACK_MS = 2500; // Use interim as final after 2.5s of no new events
 
         // Final accumulator: collect is_final fragments until speech_final or UtteranceEnd
         this._finalAccumulator = '';
         this._finalFallbackTimer = null;
-        this._FINAL_FALLBACK_MS = 1200; // Deliver accumulated finals if no speech_final within 1.2s
+        this._FINAL_FALLBACK_MS = 3500; // Deliver accumulated finals if no speech_final within 3.5s (Hindi needs more time)
     }
 
     /**
@@ -45,9 +43,8 @@ class DeepgramService {
             encoding: config.encoding || 'mulaw',  // 'alaw' for PCMA (codec 8), 'mulaw' for PCMU (codec 0)
             sample_rate: 8000,    // 8kHz for telephony
             channels: 1,
-            // 300ms: compromise between 200ms (too aggressive for Hindi pauses) and 400ms (original)
-            endpointing: 300,
-            utterance_end_ms: 1000, // Minimum allowed by Deepgram API (< 1000 returns HTTP 400)
+            endpointing: 400,     // Detect utterance end after 400ms silence (optimized for latency)
+            utterance_end_ms: 1500, // Fire UtteranceEnd event after 1500ms silence
             vad_events: true,     // Get speech start/end events
         };
 
@@ -267,13 +264,11 @@ class DeepgramService {
         this._clearFinalFallbackTimer();
         console.log('[Deepgram] Buffer clearing - ignoring transcripts');
 
-        // Reset after a short delay to allow pending transcripts to be discarded.
-        // CRITICAL: Keep this window as short as possible — a long window swallows
-        // speech_final events and forces the slow fallback timer path (was 3500ms).
+        // Reset after a short delay to allow pending transcripts to be discarded
         setTimeout(() => {
             this._ignoreTranscripts = false;
             console.log('[Deepgram] Buffer cleared - listening for transcripts');
-        }, 150);
+        }, 500);
     }
 
     /**
