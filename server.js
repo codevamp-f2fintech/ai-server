@@ -179,12 +179,66 @@ app.get('/outbound-call-info/:id', authenticate, async (req, res) => {
   }
 });
 
-// SECURED: Get all calls for the authenticated user only
+// SECURED: Get all calls for the authenticated user only (with pagination + filters)
 app.get('/calls/list', authenticate, async (req, res) => {
   try {
-    // SECURITY: Filter by userId to only show user's calls
-    const calls = await Call.find({ userId: req.userId }).sort({ createdAt: -1 });
-    res.status(200).json(calls);
+    const { page = 1, limit = 50, q, status, from, to } = req.query;
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(200, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+
+    // Build query
+    const query = { userId: new mongoose.Types.ObjectId(req.userId) };
+    if (q) query['customer.number'] = { $regex: q, $options: 'i' };
+    if (status) query.status = status;
+    if (from || to) {
+      query.createdAt = {};
+      if (from) query.createdAt.$gte = new Date(from);
+      if (to) {
+        const toDate = new Date(to);
+        toDate.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = toDate;
+      }
+    }
+
+    const [calls, totalCount, stats] = await Promise.all([
+      Call.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum),
+      Call.countDocuments(query),
+      Call.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            totalDurationSeconds: {
+              $sum: {
+                $max: [
+                  { $ifNull: ['$durationSeconds', 0] },
+                  {
+                    $cond: [
+                      { $and: [
+                        { $ne: [{ $type: '$startedAt' }, 'missing'] },
+                        { $ne: [{ $type: '$endedAt' }, 'missing'] },
+                        { $ne: ['$startedAt', null] },
+                        { $ne: ['$endedAt', null] }
+                      ]},
+                      { $divide: [{ $subtract: ['$endedAt', '$startedAt'] }, 1000] },
+                      0
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ])
+    ]);
+
+    console.log('[DEBUG] Stats aggregation result:', stats);
+    console.log('[DEBUG] Query:', query);
+
+    const totalDurationSeconds = stats.length > 0 ? Math.floor(stats[0].totalDurationSeconds) : 0;
+
+    res.status(200).json({ calls, totalCount, totalDurationSeconds, page: pageNum, limit: limitNum });
   } catch (err) {
     console.error('Failed to fetch calls', err);
     res.status(500).json({ error: 'Failed to fetch calls' });
