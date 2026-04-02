@@ -53,6 +53,29 @@ class CallService {
             actualConfig.firstMessage = actualConfig.firstMessage.replace(/\{\{\w+\}\}/g, '').replace(/\s{2,}/g, ' ').trim();
         }
 
+        // --- PRE-FLIGHT TTS HEALTH CHECK ---
+        const voiceProvider = (actualConfig.voice?.provider || '11labs').toLowerCase();
+        if (voiceProvider === 'chatterbox') {
+            const ChatterboxService = require('./chatterbox.service');
+            const chatterboxUrl = process.env.CHATTERBOX_BASE_URL || 'http://localhost:4123';
+            const chatterboxKey = process.env.CHATTERBOX_API_KEY || null;
+            const tts = new ChatterboxService(chatterboxUrl, chatterboxKey);
+            const health = await tts.healthCheck();
+            if (!health.ok) {
+                throw new Error(`TTS Service is currently unavailable. Status: ${health.status}. Call aborted.`);
+            }
+        } else {
+            const ElevenLabsService = require('./elevenlabs.service');
+            const elevenlabsKey = process.env.ELEVENLABS_API_KEY;
+            if (elevenlabsKey) {
+                const tts = new ElevenLabsService(elevenlabsKey);
+                const health = await tts.healthCheck();
+                if (!health.ok) {
+                    throw new Error(`ElevenLabs TTS Service is currently unavailable. Error: ${health.error}. Call aborted.`);
+                }
+            }
+        }
+
         let call, callRecord;
 
         // Check if using SIP Trunk

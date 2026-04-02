@@ -249,6 +249,19 @@ class ElevenLabsService {
     }
 
     /**
+     * Health check — quick ping to verify API key and service availability
+     */
+    async healthCheck() {
+        try {
+            // Using getModels as a lightweight ping since it just returns metadata
+            await this.client.models.getAll();
+            return { ok: true, status: 'ok' };
+        } catch (error) {
+            return { ok: false, status: 'unreachable', error: error.message };
+        }
+    }
+
+    /**
      * Stop current audio stream
      */
     stop() {

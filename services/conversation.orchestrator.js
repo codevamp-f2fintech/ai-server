@@ -453,7 +453,9 @@ class ConversationOrchestrator extends EventEmitter {
 
             // Enqueue a sentence — merges short sentences to avoid excess TTS round-trips
             const enqueueSentence = (sentence, force = false) => {
-                sentence = sentence.trim();
+                // Strip [END_CALL] before TTS to prevent saying it out loud
+                sentence = sentence.replace(/\[END_CALL\]/g, '').trim();
+                
                 if (!sentence || this._aborted) return;
 
                 const cleanText = stripMarkdown(sentence);
