@@ -384,15 +384,18 @@ class SipTrunkService extends EventEmitter {
     createByeRequest(toNumber, callId, fromTag, toTag, cseq, localIp, localSipPort = 5060, contactUri = null, routeHeader = null) {
         let cleanTo = toNumber.replace(/^\+/, '');
         if (cleanTo.startsWith('91') && cleanTo.length > 10) cleanTo = cleanTo.substring(2);
-        const cleanFrom = this.fromNumber.replace(/^\+/, '');
+
+        // BUG FIX: From URI must use the SIP *username* (registered identity, e.g. "2002"),
+        // NOT the fromNumber. The original INVITE used username as From, so the BYE must
+        // match it exactly — otherwise the SIP trunk rejects the BYE (dialog mismatch).
+        const fromUri = `sip:${this.username}@${this.serverIp}`;
+        const toUri = `sip:${cleanTo}@${this.serverIp}`;
 
         let uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
         if (contactUri) {
             uri = contactUri.startsWith('sip:') ? contactUri : `sip:${contactUri}`;
         }
 
-        const fromUri = `sip:${cleanFrom}@${this.serverIp}`;
-        const toUri = `sip:${cleanTo}@${this.serverIp}`;
         const branch = this.generateBranch();
 
         const request = [
@@ -1232,6 +1235,9 @@ class SipTrunkService extends EventEmitter {
             return;
         }
 
+        // Mark call as ended so no more audio is queued
+        callData.callEnded = true;
+
         // Clear keep-alive interval
         if (callData.keepAliveInterval) {
             clearInterval(callData.keepAliveInterval);
@@ -1260,13 +1266,35 @@ class SipTrunkService extends EventEmitter {
             callData.recordRoute
         );
 
-        callData.socket.send(bye, this.port, this.serverIp, () => {
-            console.log('[SipTrunk] BYE sent');
+        // BUG FIX: Resolve the correct BYE target from the Contact URI returned in 200 OK,
+        // NOT always the SIP trunk server IP. Per RFC 3261, BYE goes to the Contact address.
+        let byeTargetIp = this.serverIp;
+        let byeTargetPort = this.port;
+        if (callData.contactUri) {
+            // Parse host:port from sip:user@host:port;params
+            const contactMatch = callData.contactUri.match(/sip:[^@]+@([^;>\s:]+)(?::(\d+))?/i);
+            if (contactMatch) {
+                byeTargetIp = contactMatch[1];
+                byeTargetPort = contactMatch[2] ? parseInt(contactMatch[2]) : this.port;
+            }
+        }
+
+        console.log(`[SipTrunk] Sending BYE to ${byeTargetIp}:${byeTargetPort} (callId: ${callId})`);
+        console.log('[SipTrunk] BYE message:\n' + bye);
+
+        await new Promise((resolve) => {
+            callData.socket.send(bye, byeTargetPort, byeTargetIp, (err) => {
+                if (err) console.error('[SipTrunk] Error sending BYE:', err);
+                else console.log('[SipTrunk] BYE sent successfully');
+                resolve();
+            });
         });
 
-        // Cleanup
-        if (callData.rtpSocket) callData.rtpSocket.close();
-        callData.socket.close();
+        // Cleanup AFTER BYE is confirmed sent
+        if (callData.rtpSocket) {
+            try { callData.rtpSocket.close(); } catch (e) { }
+        }
+        try { callData.socket.close(); } catch (e) { }
         this.activeCalls.delete(callId);
 
         this.emit('ended', { callId, internalCallId: callData.internalCallId });
