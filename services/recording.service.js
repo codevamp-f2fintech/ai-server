@@ -63,6 +63,8 @@ class RecordingService {
      * Add a timestamped audio chunk to the recording.
      * The chunk is tagged with the milliseconds elapsed since call start so
      * it can be placed at the correct position on the shared timeline.
+     * Agent audio arrives in bursts faster than real-time, so we must calculate
+     * a continuous playhead to prevent overlapping chunks.
      *
      * @param {string} callId     - Call identifier
      * @param {Buffer} chunk      - Audio data (μ-law 8 kHz mono)
@@ -72,16 +74,53 @@ class RecordingService {
         const recording = this.activeRecordings.get(callId);
         if (!recording) return;
 
-        // Capture the wall-clock offset from call start NOW (not at mix time).
-        const offsetMs = Date.now() - recording.startTime;
+        // Initialize playheads if not present
+        if (!recording.playheads) {
+            recording.playheads = { caller: 0, agent: 0 };
+        }
 
-        recording.chunks.push({ offsetMs, data: chunk, direction });
+        const nowOffsetMs = Date.now() - recording.startTime;
+        let effectiveOffsetMs = nowOffsetMs;
+
+        // Prevent chunks going backward in time (especially for bursty agent audio)
+        if (recording.playheads[direction] > nowOffsetMs) {
+            effectiveOffsetMs = recording.playheads[direction];
+        }
+
+        recording.chunks.push({ offsetMs: effectiveOffsetMs, data: chunk, direction });
         recording.byteCount += chunk.length;
+
+        // Advance playhead by the exact duration of the chunk
+        const chunkDurationMs = (chunk.length / SAMPLE_RATE) * 1000;
+        recording.playheads[direction] = effectiveOffsetMs + chunkDurationMs;
 
         // Log progress occasionally
         if (recording.byteCount % 100000 < chunk.length) {
             console.log(`[RecordingService] Recording ${callId}: ${Math.round(recording.byteCount / 1024)}KB captured`);
         }
+    }
+
+    /**
+     * Clear unplayed agent audio on barge-in to prevent the agent from talking
+     * over the caller in the recording when they were technically interrupted.
+     */
+    clearUnplayedAgentAudio(callId) {
+        const recording = this.activeRecordings.get(callId);
+        if (!recording) return;
+
+        const nowOffsetMs = Date.now() - recording.startTime;
+
+        // Filter out agent chunks entirely scheduled AFTER the interrupt time
+        recording.chunks = recording.chunks.filter(chunk => 
+            chunk.direction !== 'agent' || chunk.offsetMs <= nowOffsetMs
+        );
+
+        // Reset agent playhead to current time
+        if (recording.playheads) {
+            recording.playheads.agent = nowOffsetMs;
+        }
+        
+        console.log(`[RecordingService] Cleared unplayed agent audio for barge-in on ${callId}`);
     }
 
     /**
