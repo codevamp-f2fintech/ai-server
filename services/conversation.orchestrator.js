@@ -38,6 +38,34 @@ function isOnlyAudioTags(text) {
     return stripped.length === 0;
 }
 
+/**
+ * Detect automated voicemail and IVR responses from transcripts.
+ * Used to proactively hang up the call to save credits and agent time.
+ */
+const VOICEMAIL_KEYWORDS = [
+    /record your message/i,
+    /record your name/i,
+    /stay on the line/i,
+    /trying to reach is not available/i,
+    /person you are calling/i,
+    /please leave your message/i,
+    /after the tone/i,
+    /forwarded to an automatic/i,
+    /is not answering/i,
+    /number you have dialed/i,
+    /subscriber you have dialed/i,
+    /is currently busy/i,
+    /out of coverage/i,
+    /switched off/i,
+    /not reachable/i,
+    /leave a message/i,
+    /voicemail/i
+];
+
+function isVoicemail(text) {
+    return VOICEMAIL_KEYWORDS.some(regex => regex.test(text));
+}
+
 class ConversationOrchestrator extends EventEmitter {
     constructor(agentConfig, apiKeys) {
         super();
@@ -281,6 +309,13 @@ class ConversationOrchestrator extends EventEmitter {
                 content: fullTranscript,
                 timestamp: new Date()
             });
+
+            // Voicemail / IVR detection
+            if (isVoicemail(fullTranscript)) {
+                console.log(`[Orchestrator] ⚠️ Automated IVR/Voicemail detected from transcript: "${fullTranscript}". Hanging up.`);
+                this.end('voicemail');
+                return;
+            }
 
             // Mark thinking EARLY — prevents a second timer from starting its own Gemini call
             // during the response delay below

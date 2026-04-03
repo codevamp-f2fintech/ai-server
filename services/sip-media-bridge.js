@@ -321,7 +321,7 @@ class SipMediaBridge {
 
             // 5. Update Call record in database (AI summary + DB update)
             try {
-                const callInfo = await this.generateCallSummary(conversationLog);
+                const callInfo = await this.generateCallSummary(conversationLog, reason);
 
                 await Call.findByIdAndUpdate(
                     internalCallId,
@@ -392,7 +392,17 @@ class SipMediaBridge {
     /**
      * Generate AI call summary and determine lead status using Gemini
      */
-    async generateCallSummary(conversationLog) {
+    async generateCallSummary(conversationLog, reason) {
+        if (reason === 'voicemail') {
+            return {
+                summary: 'Call went to Voicemail / Automated system.',
+                leadStatus: 'voicemail',
+                leadType: 'Cold',
+                leadProfile: 'Unknown',
+                statusClassification: 'Voicemail'
+            };
+        }
+
         if (!conversationLog || conversationLog.length === 0) {
             return { summary: 'No conversation recorded', leadStatus: 'unknown', leadType: 'Cold', leadProfile: 'Unknown' };
         }
