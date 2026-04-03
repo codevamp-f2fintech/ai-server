@@ -823,10 +823,18 @@ class SipTrunkService extends EventEmitter {
                         }
 
                         // Resend ACK for duplicate 200 OK (important to avoid provider timeout)
-                        const ack = this.createAckRequest(
-                            toNumber, callId, fromTag, callData.toTag || response.toTag, callData.cseq, localIp, callData.localSipPort, callData.contactUri, callData.recordRoute
-                        );
-                        socket.send(ack, this.port, this.serverIp);
+                        // Determine correct destination for ACK (use Route if present)
+                        let ackTargetIp = this.serverIp;
+                        let ackTargetPort = this.port;
+                        if (callData.recordRoute) {
+                            const routeMatch = callData.recordRoute.match(/<sip:([^;>\s:]+)(?::(\d+))?/i);
+                            if (routeMatch) {
+                                ackTargetIp = routeMatch[1];
+                                ackTargetPort = routeMatch[2] ? parseInt(routeMatch[2]) : this.port;
+                            }
+                        }
+
+                        socket.send(ack, ackTargetPort, ackTargetIp);
                         return;
                     }
                     callData.answered = true;
@@ -858,11 +866,22 @@ class SipTrunkService extends EventEmitter {
                     if (response.contactUri) callData.contactUri = response.contactUri;
                     if (response.recordRoute) callData.recordRoute = response.recordRoute;
 
+                    // Determine correct destination for ACK (use Route if present)
+                    let ackTargetIp = this.serverIp;
+                    let ackTargetPort = this.port;
+                    if (callData.recordRoute) {
+                        const routeMatch = callData.recordRoute.match(/<sip:([^;>\s:]+)(?::(\d+))?/i);
+                        if (routeMatch) {
+                            ackTargetIp = routeMatch[1];
+                            ackTargetPort = routeMatch[2] ? parseInt(routeMatch[2]) : this.port;
+                        }
+                    }
+
                     // Send ACK
                     const ack = this.createAckRequest(
                         toNumber, callId, fromTag, response.toTag, callData.cseq, localIp, callData.localSipPort, callData.contactUri, callData.recordRoute
                     );
-                    socket.send(ack, this.port, this.serverIp);
+                    socket.send(ack, ackTargetPort, ackTargetIp);
 
                     // Start RTP socket for audio
                     this.startRtpSession(callData, localIp);
@@ -1266,16 +1285,28 @@ class SipTrunkService extends EventEmitter {
             callData.recordRoute
         );
 
-        // BUG FIX: Resolve the correct BYE target from the Contact URI returned in 200 OK,
-        // NOT always the SIP trunk server IP. Per RFC 3261, BYE goes to the Contact address.
+        // RFC 3261 ROUTING RULES:
+        // 1. If Route set is NOT empty, send to first URI in Route set.
+        // 2. If Route set is empty, send to remote target (Contact).
         let byeTargetIp = this.serverIp;
         let byeTargetPort = this.port;
-        if (callData.contactUri) {
+
+        if (callData.recordRoute) {
+            // Parse host:port from Record-Route set (usually <sip:host:port;lr>)
+            // We take the first proxy in the set.
+            const routeMatch = callData.recordRoute.match(/<sip:([^;>\s:]+)(?::(\d+))?/i);
+            if (routeMatch) {
+                byeTargetIp = routeMatch[1];
+                byeTargetPort = routeMatch[2] ? parseInt(routeMatch[2]) : this.port;
+                console.log(`[SipTrunk] Route set detected, targeting proxy: ${byeTargetIp}:${byeTargetPort}`);
+            }
+        } else if (callData.contactUri) {
             // Parse host:port from sip:user@host:port;params
             const contactMatch = callData.contactUri.match(/sip:[^@]+@([^;>\s:]+)(?::(\d+))?/i);
             if (contactMatch) {
                 byeTargetIp = contactMatch[1];
                 byeTargetPort = contactMatch[2] ? parseInt(contactMatch[2]) : this.port;
+                console.log(`[SipTrunk] No route set, targeting remote contact: ${byeTargetIp}:${byeTargetPort}`);
             }
         }
 
@@ -1291,6 +1322,8 @@ class SipTrunkService extends EventEmitter {
         });
 
         // Cleanup AFTER BYE is confirmed sent
+        await new Promise(r => setTimeout(r, 200)); // Grace period for network buffers
+
         if (callData.rtpSocket) {
             try { callData.rtpSocket.close(); } catch (e) { }
         }
