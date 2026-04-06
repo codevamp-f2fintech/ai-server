@@ -490,7 +490,7 @@ class ConversationOrchestrator extends EventEmitter {
             const enqueueSentence = (sentence, force = false) => {
                 // Strip [END_CALL] before TTS to prevent saying it out loud
                 sentence = sentence.replace(/\[END_CALL\]/g, '').trim();
-                
+
                 if (!sentence || this._aborted) return;
 
                 const cleanText = stripMarkdown(sentence);
@@ -875,11 +875,6 @@ class ConversationOrchestrator extends EventEmitter {
         }
         if (this.tts) {
             this.tts.stop();
-        }
-
-        // Cleanup Gemini context cache if exists
-        if (this.gemini && typeof this.gemini.deleteCache === 'function') {
-            this.gemini.deleteCache();
         }
 
         // Calculate stats

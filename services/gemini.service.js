@@ -2,7 +2,6 @@
 // Handles conversation with Google Gemini AI
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const { GoogleAICacheManager } = require("@google/generative-ai/server");
 const https = require('https');
 const http = require('http');
 
@@ -30,9 +29,7 @@ class GeminiService {
             throw new Error('Gemini API key is required');
         }
         this.genAI = new GoogleGenerativeAI(apiKey);
-        this.cacheManager = new GoogleAICacheManager(apiKey);
         this.conversationHistory = [];
-        this.cache = null;
     }
 
     /**
@@ -142,10 +139,10 @@ class GeminiService {
 
         // Add latency-optimization prompt
         systemPrompt += `\n\n[CONVERSATIONAL STYLE - CRITICAL FOR LOW LATENCY]\n- Keep sentences short, punchy, and direct.\n- Use simple, natural language as if speaking on the phone.\n- Avoid long, complex explanations. Aim for 1-2 short sentences per turn unless a longer explanation is explicitly requested.\n- Always end with a short, easy-to-answer follow-up question to keep the lead engaged.`;
-        
+
         // Add call end instruction
         systemPrompt += `\n\n[ENDING THE CALL]\nWhen the conversation is naturally finished (e.g., after saying goodbye, or if the user is completely uninterested and wants to hang up), you MUST include the exact string "[END_CALL]" at the very end of your response to remotely cut the call.`;
-        
+
         console.log('[Gemini] Latency-optimization and call ending prompts added');
 
         // Determine output token limit (Devanagari uses ~3-4x more tokens than English)
@@ -155,65 +152,30 @@ class GeminiService {
         // IMPORTANT: Disable thinking for Gemini 2.5 Flash — thinking tokens consume
         // the maxOutputTokens budget, causing mid-sentence truncation and 5s+ latency.
         // A phone call agent needs fast, simple responses, not deep reasoning.
-        
-        // --- CONTEXT CACHING LOGIC ---
-        // Explicit caching requires min 32,768 tokens (~130k-150k characters).
-        // If systemPrompt + KB is below this, we use standard initialization.
-        const CHARACTER_THRESHOLD = 150000;
-        const currentContentSize = systemPrompt.length;
-        
-        if (currentContentSize > CHARACTER_THRESHOLD) {
-            console.log(`[Gemini] Context size (${currentContentSize} chars) exceeds threshold. Creating cache...`);
-            try {
-                // Ensure model name has models/ prefix for cache manager
-                const fullModelName = modelName.startsWith('models/') ? modelName : `models/${modelName}`;
-                
-                // Delete existing cache for this session if it exists
-                if (this.cache) {
-                    await this.deleteCache();
+        this.model = this.genAI.getGenerativeModel({
+            model: modelName,
+            generationConfig: {
+                temperature: config.temperature || 0.7,
+                maxOutputTokens,
+                topP: 0.95,
+                topK: 40,
+                thinkingConfig: {
+                    thinkingBudget: 0  // Disable thinking entirely
                 }
-
-                this.cache = await this.cacheManager.create({
-                    model: fullModelName,
-                    displayName: `telecaller_session_${Date.now()}`,
-                    systemInstruction: systemPrompt,
-                    contents: [],
-                    ttlSeconds: 1800, // 30 minutes
-                });
-
-                console.log(`[Gemini] ✅ Context cache created: ${this.cache.name}`);
-                
-                this.model = this.genAI.getGenerativeModelFromCachedContent(this.cache);
-            } catch (err) {
-                console.error('[Gemini] ❌ Cache creation failed, falling back to standard prompt:', err.message);
-                this.model = this.genAI.getGenerativeModel({
-                    model: modelName,
-                    systemInstruction: systemPrompt
-                });
-            }
-        } else {
-            console.log(`[Gemini] Context size (${currentContentSize} chars) below threshold. Using standard prompt.`);
-            this.model = this.genAI.getGenerativeModel({
-                model: modelName,
-                systemInstruction: systemPrompt
-            });
-        }
-
-        // Apply shared generation config
-        const generationConfig = {
-            temperature: config.temperature || 0.7,
-            maxOutputTokens,
-            topP: 0.95,
-            topK: 40,
-            thinkingConfig: {
-                thinkingBudget: 0  // Disable thinking entirely
-            }
-        };
+            },
+            systemInstruction: systemPrompt
+        });
 
         // Start chat session with empty history
         this.chat = this.model.startChat({
             history: [],
-            generationConfig
+            generationConfig: {
+                temperature: config.temperature || 0.7,
+                maxOutputTokens,
+                thinkingConfig: {
+                    thinkingBudget: 0
+                }
+            }
         });
 
         this.conversationHistory = [];
@@ -221,21 +183,6 @@ class GeminiService {
             this.conversationHistory.push({ role: 'assistant', content: config.firstMessage });
         }
         console.log('[Gemini] Conversation initialized');
-    }
-
-    /**
-     * Delete active context cache to save cost
-     */
-    async deleteCache() {
-        if (this.cache) {
-            try {
-                await this.cacheManager.delete(this.cache.name);
-                console.log(`[Gemini] Cache deleted: ${this.cache.name}`);
-                this.cache = null;
-            } catch (err) {
-                console.warn('[Gemini] Failed to delete cache:', err.message);
-            }
-        }
     }
 
     /**
@@ -391,17 +338,17 @@ class GeminiService {
 
             const result = await this.model.generateContent(prompt);
             const responseText = result.response.text().trim();
-            
+
             // Clean JSON response (handle markdown blocks if any)
             const jsonStr = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
             return JSON.parse(jsonStr);
         } catch (error) {
             console.error('[Gemini] Analysis error:', error);
-            return { 
-                leadType: 'Unknown', 
-                leadProfile: 'Unknown', 
-                statusClassification: 'Error', 
-                summary: 'Analysis failed' 
+            return {
+                leadType: 'Unknown',
+                leadProfile: 'Unknown',
+                statusClassification: 'Error',
+                summary: 'Analysis failed'
             };
         }
     }
