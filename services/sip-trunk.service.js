@@ -1110,41 +1110,13 @@ class SipTrunkService extends EventEmitter {
         // Start the pacing timer if not already running
         if (!callData.audioSendInterval) {
             callData.isSendingAudio = true;
-            callData.drainCount = 0; // Reset drain phase
 
             callData.audioSendInterval = setInterval(() => {
                 if (callData.audioQueue.length === 0) {
-                    // Start drain phase to prevent clipped words at end of talkspurt
-                    if (!callData.drainCount) callData.drainCount = 0;
-                    if (callData.drainCount < 3) {
-                        callData.drainCount++;
-                        const silenceByte = callData.remoteCodec === 8 ? 0xD5 : 0xFF; // A-law or μ-law silence
-                        const silencePacket = Buffer.alloc(CHUNK_SIZE, silenceByte);
-
-                        // RTP Header
-                        const header = Buffer.alloc(12);
-                        header.writeUInt8(0x80, 0);
-                        header.writeUInt8(callData.remoteCodec || 0x00, 1); // No marker bit on drain (continuation)
-                        header.writeUInt16BE(callData.rtpSequence++ & 0xFFFF, 2);
-                        header.writeUInt32BE(callData.rtpTimestamp, 4);
-                        header.writeUInt32BE(callData.ssrc, 8);
-                        const rtpPacket = Buffer.concat([header, silencePacket]);
-                        callData.rtpTimestamp += CHUNK_SIZE;
-
-                        const targetIp = callData.remoteRtpIp || this.serverIp;
-                        const targetPort = callData.remoteRtpPort || callData.rtpPort;
-                        try {
-                            callData.rtpSocket.send(rtpPacket, targetPort, targetIp);
-                            callData.lastRtpSentTime = Date.now();
-                        } catch (err) { }
-                        return;
-                    }
-
-                    // Queue empty and drain complete, stop sending
+                    // Queue empty, stop sending
                     clearInterval(callData.audioSendInterval);
                     callData.audioSendInterval = null;
                     callData.isSendingAudio = false;
-                    callData.drainCount = 0;
                     callData.lastAudioSentTime = Date.now();
                     this.emit('playback_complete', callId);
                     return;
@@ -1226,42 +1198,23 @@ class SipTrunkService extends EventEmitter {
         if (!callData.audioQueue) callData.audioQueue = [];
         callData.audioQueue.push(finalFrameChunk);
 
+        // Explicitly append 3 silence packets (60ms) to the queue as a "tail"
+        // This ensures the final word is never clipped by the remote jitter buffer.
+        // Doing this here (at end of turn) prevents stuttering between TTS chunks. 
+        const silenceByteForTail = callData.remoteCodec === 8 ? 0xD5 : 0xFF;
+        const silenceTailPacket = Buffer.alloc(CHUNK_SIZE, silenceByteForTail);
+        callData.audioQueue.push(silenceTailPacket);
+        callData.audioQueue.push(silenceTailPacket);
+        callData.audioQueue.push(silenceTailPacket);
+
         // Start pacing timer if not already running
         if (!callData.audioSendInterval) {
             callData.isSendingAudio = true;
-            callData.drainCount = 0; // Reset drain phase
             callData.audioSendInterval = setInterval(() => {
                 if (!callData.audioQueue || callData.audioQueue.length === 0) {
-                    // Start drain phase to prevent clipped words at end of talkspurt
-                    if (callData.drainCount === undefined) callData.drainCount = 0;
-                    if (callData.drainCount < 3) {
-                        callData.drainCount++;
-                        const silenceByte = callData.remoteCodec === 8 ? 0xD5 : 0xFF;
-                        const silencePacket = Buffer.alloc(CHUNK_SIZE, silenceByte);
-
-                        // RTP Header
-                        const header = Buffer.alloc(12);
-                        header.writeUInt8(0x80, 0);
-                        header.writeUInt8(callData.remoteCodec || 0x00, 1);
-                        header.writeUInt16BE(callData.rtpSequence++ & 0xFFFF, 2);
-                        header.writeUInt32BE(callData.rtpTimestamp, 4);
-                        header.writeUInt32BE(callData.ssrc, 8);
-                        const rtpPacket = Buffer.concat([header, silencePacket]);
-                        callData.rtpTimestamp += CHUNK_SIZE;
-
-                        const targetIp = callData.remoteRtpIp || this.serverIp;
-                        const targetPort = callData.remoteRtpPort || callData.rtpPort;
-                        try {
-                            callData.rtpSocket.send(rtpPacket, targetPort, targetIp);
-                            callData.lastRtpSentTime = Date.now();
-                        } catch (err) { }
-                        return;
-                    }
-
                     clearInterval(callData.audioSendInterval);
                     callData.audioSendInterval = null;
                     callData.isSendingAudio = false;
-                    callData.drainCount = 0;
                     callData.lastAudioSentTime = Date.now();
                     this.emit('playback_complete', callId);
                     return;
