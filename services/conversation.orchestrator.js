@@ -877,6 +877,11 @@ class ConversationOrchestrator extends EventEmitter {
             this.tts.stop();
         }
 
+        // Cleanup Gemini context cache if exists
+        if (this.gemini && typeof this.gemini.deleteCache === 'function') {
+            this.gemini.deleteCache();
+        }
+
         // Calculate stats
         const duration = (Date.now() - this.startTime) / 1000;
 

@@ -2,6 +2,7 @@
 // Handles conversation with Google Gemini AI
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { GoogleAICacheManager } = require("@google/generative-ai/server");
 const https = require('https');
 const http = require('http');
 
@@ -29,7 +30,9 @@ class GeminiService {
             throw new Error('Gemini API key is required');
         }
         this.genAI = new GoogleGenerativeAI(apiKey);
+        this.cacheManager = new GoogleAICacheManager(apiKey);
         this.conversationHistory = [];
+        this.cache = null;
     }
 
     /**
@@ -152,30 +155,65 @@ class GeminiService {
         // IMPORTANT: Disable thinking for Gemini 2.5 Flash — thinking tokens consume
         // the maxOutputTokens budget, causing mid-sentence truncation and 5s+ latency.
         // A phone call agent needs fast, simple responses, not deep reasoning.
-        this.model = this.genAI.getGenerativeModel({
-            model: modelName,
-            generationConfig: {
-                temperature: config.temperature || 0.7,
-                maxOutputTokens,
-                topP: 0.95,
-                topK: 40,
-                thinkingConfig: {
-                    thinkingBudget: 0  // Disable thinking entirely
+        
+        // --- CONTEXT CACHING LOGIC ---
+        // Explicit caching requires min 32,768 tokens (~130k-150k characters).
+        // If systemPrompt + KB is below this, we use standard initialization.
+        const CHARACTER_THRESHOLD = 150000;
+        const currentContentSize = systemPrompt.length;
+        
+        if (currentContentSize > CHARACTER_THRESHOLD) {
+            console.log(`[Gemini] Context size (${currentContentSize} chars) exceeds threshold. Creating cache...`);
+            try {
+                // Ensure model name has models/ prefix for cache manager
+                const fullModelName = modelName.startsWith('models/') ? modelName : `models/${modelName}`;
+                
+                // Delete existing cache for this session if it exists
+                if (this.cache) {
+                    await this.deleteCache();
                 }
-            },
-            systemInstruction: systemPrompt
-        });
+
+                this.cache = await this.cacheManager.create({
+                    model: fullModelName,
+                    displayName: `telecaller_session_${Date.now()}`,
+                    systemInstruction: systemPrompt,
+                    contents: [],
+                    ttlSeconds: 1800, // 30 minutes
+                });
+
+                console.log(`[Gemini] ✅ Context cache created: ${this.cache.name}`);
+                
+                this.model = this.genAI.getGenerativeModelFromCachedContent(this.cache);
+            } catch (err) {
+                console.error('[Gemini] ❌ Cache creation failed, falling back to standard prompt:', err.message);
+                this.model = this.genAI.getGenerativeModel({
+                    model: modelName,
+                    systemInstruction: systemPrompt
+                });
+            }
+        } else {
+            console.log(`[Gemini] Context size (${currentContentSize} chars) below threshold. Using standard prompt.`);
+            this.model = this.genAI.getGenerativeModel({
+                model: modelName,
+                systemInstruction: systemPrompt
+            });
+        }
+
+        // Apply shared generation config
+        const generationConfig = {
+            temperature: config.temperature || 0.7,
+            maxOutputTokens,
+            topP: 0.95,
+            topK: 40,
+            thinkingConfig: {
+                thinkingBudget: 0  // Disable thinking entirely
+            }
+        };
 
         // Start chat session with empty history
         this.chat = this.model.startChat({
             history: [],
-            generationConfig: {
-                temperature: config.temperature || 0.7,
-                maxOutputTokens,
-                thinkingConfig: {
-                    thinkingBudget: 0
-                }
-            }
+            generationConfig
         });
 
         this.conversationHistory = [];
@@ -183,6 +221,21 @@ class GeminiService {
             this.conversationHistory.push({ role: 'assistant', content: config.firstMessage });
         }
         console.log('[Gemini] Conversation initialized');
+    }
+
+    /**
+     * Delete active context cache to save cost
+     */
+    async deleteCache() {
+        if (this.cache) {
+            try {
+                await this.cacheManager.delete(this.cache.name);
+                console.log(`[Gemini] Cache deleted: ${this.cache.name}`);
+                this.cache = null;
+            } catch (err) {
+                console.warn('[Gemini] Failed to delete cache:', err.message);
+            }
+        }
     }
 
     /**
