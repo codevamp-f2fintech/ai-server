@@ -166,23 +166,41 @@ class GeminiService {
             systemInstruction: systemPrompt
         });
 
-        // Start chat session with empty history
-        this.chat = this.model.startChat({
-            history: [],
-            generationConfig: {
-                temperature: config.temperature || 0.7,
-                maxOutputTokens,
-                thinkingConfig: {
-                    thinkingBudget: 0
-                }
-            }
-        });
+        // Store model config for rebuilding chat sessions
+        this._modelConfig = { temperature: config.temperature || 0.7, maxOutputTokens };
 
         this.conversationHistory = [];
         if (config.firstMessage) {
             this.conversationHistory.push({ role: 'assistant', content: config.firstMessage });
         }
+
+        // Start chat session — will be rebuilt each turn with capped history
+        this.chat = this._buildChat([]);
         console.log('[Gemini] Conversation initialized');
+    }
+
+    /**
+     * Build a fresh chat session using the last N turns of history.
+     * This keeps the input token count flat (capped) regardless of call length,
+     * preventing the per-turn latency creep caused by growing context.
+     * @param {Array} history - conversationHistory slice to seed the chat with
+     * @returns {ChatSession}
+     */
+    _buildChat(history) {
+        // Convert our flat history into Gemini SDK format {role, parts:[{text}]}
+        const geminiHistory = history.map(msg => ({
+            role: msg.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: msg.content }]
+        }));
+
+        return this.model.startChat({
+            history: geminiHistory,
+            generationConfig: {
+                temperature: this._modelConfig.temperature,
+                maxOutputTokens: this._modelConfig.maxOutputTokens,
+                thinkingConfig: { thinkingBudget: 0 }
+            }
+        });
     }
 
     /**
@@ -195,13 +213,22 @@ class GeminiService {
         try {
             console.log(`[Gemini] User: ${userMessage}`);
 
-            // Add user message to history
+            // Add user message to history BEFORE building the chat so the
+            // window includes the current turn's context
             this.conversationHistory.push({
                 role: 'user',
                 content: userMessage
             });
 
-            // Send message and get streaming response
+            // --- HISTORY CAP ---
+            // Keep only the last 6 messages (3 turns) to prevent input token
+            // growth from slowing down TTFT as the conversation progresses.
+            const MAX_HISTORY = 6;
+            const windowHistory = this.conversationHistory.slice(-MAX_HISTORY - 1, -1); // everything except the just-pushed user msg
+            console.log(`[Gemini] History window: ${windowHistory.length}/${this.conversationHistory.length - 1} messages sent to API`);
+
+            // Rebuild chat with capped history, then send the new user message
+            this.chat = this._buildChat(windowHistory);
             const result = await this.chat.sendMessageStream(userMessage);
 
             let fullResponse = '';
@@ -260,6 +287,28 @@ class GeminiService {
      */
     getHistory() {
         return this.conversationHistory;
+    }
+
+    /**
+     * Pre-warm the Gemini connection by sending a minimal dummy request.
+     * Call this in parallel while TTS is playing the first message.
+     * This triggers implicit caching of the system prompt on Google's side,
+     * so when the real user reply arrives, TTFT is significantly lower.
+     * Fire-and-forget — never awaited by the caller.
+     */
+    async warmUp() {
+        try {
+            const t0 = Date.now();
+            console.log('[Gemini] 🔥 Warming up connection (parallel with first message TTS)...');
+            const warmupChat = this._buildChat([]);
+            // Send a minimal internal signal — Gemini processes the full system
+            // prompt + KB, establishing the implicit cache for the real turn.
+            await warmupChat.sendMessage('[SYSTEM_WARMUP]');
+            console.log(`[Gemini] ✅ Warm-up complete in ${Date.now() - t0}ms — next turn will be faster`);
+        } catch (e) {
+            // Best-effort: warm-up failure must never affect the live call
+            console.warn('[Gemini] Warm-up skipped (non-fatal):', e.message);
+        }
     }
 
     /**

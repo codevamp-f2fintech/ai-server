@@ -162,8 +162,14 @@ class ConversationOrchestrator extends EventEmitter {
                 timestamp: new Date()
             });
 
-            // Lock barge-in for the duration of the first message
+            // Lock barge-in for the duration of the first message.
+            // SIMULTANEOUSLY fire a Gemini warm-up request in parallel —
+            // this pre-warms the HTTP connection and triggers implicit caching
+            // of the system prompt so the user's first real reply gets a much
+            // lower TTFT (Time To First Token).  warmUp() is fire-and-forget;
+            // failures are silently swallowed inside the method.
             this._speakingFirstMessage = true;
+            this.gemini.warmUp(); // 🔥 non-blocking — runs during TTS playback
             await this.speak(this.agentConfig.firstMessage);
             this._speakingFirstMessage = false;
             console.log('[Orchestrator] First message complete — barge-in now enabled');
