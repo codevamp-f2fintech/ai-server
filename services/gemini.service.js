@@ -179,19 +179,30 @@ class GeminiService {
         console.log('[Gemini] Conversation initialized');
     }
 
-    /**
-     * Build a fresh chat session using the last N turns of history.
-     * This keeps the input token count flat (capped) regardless of call length,
-     * preventing the per-turn latency creep caused by growing context.
-     * @param {Array} history - conversationHistory slice to seed the chat with
-     * @returns {ChatSession}
-     */
     _buildChat(history) {
         // Convert our flat history into Gemini SDK format {role, parts:[{text}]}
-        const geminiHistory = history.map(msg => ({
-            role: msg.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: msg.content }]
-        }));
+        // The Gemini SDK strictly requires history to alternate and ALWAYS start with 'user'.
+        // We filter the history to enforce this strict alternating pattern automatically.
+        const geminiHistory = [];
+        let expectedRole = 'user';
+
+        for (const msg of history) {
+            const mappedRole = msg.role === 'assistant' ? 'model' : 'user';
+            // Only add if it matches the expected alternating sequence
+            if (mappedRole === expectedRole) {
+                geminiHistory.push({
+                    role: mappedRole,
+                    parts: [{ text: msg.content }]
+                });
+                expectedRole = expectedRole === 'user' ? 'model' : 'user';
+            }
+        }
+
+        // Before sending a new user message, history MUST end with a 'model' turn (or be empty).
+        // If it ends with 'user', it means an orphaned turn exists, so we drop it.
+        if (geminiHistory.length > 0 && geminiHistory[geminiHistory.length - 1].role === 'user') {
+            geminiHistory.pop();
+        }
 
         return this.model.startChat({
             history: geminiHistory,
