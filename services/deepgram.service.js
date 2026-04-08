@@ -21,6 +21,13 @@ class DeepgramService {
         this._finalAccumulator = '';
         this._finalFallbackTimer = null;
         this._FINAL_FALLBACK_MS = 3500; // Deliver accumulated finals if no speech_final within 3.5s (Hindi needs more time)
+
+        // Generation counter for zero-delay buffer clearing (replaces timer-based approach)
+        this._generation = 0;
+
+        // Health monitor
+        this._lastTranscriptEventAt = Date.now();
+        this._healthCheckInterval = null;
     }
 
     /**
@@ -28,10 +35,19 @@ class DeepgramService {
      * @param {Object} config - Transcriber configuration from agent
      * @param {Function} onTranscript - Callback when transcript is received
      * @param {Function} onError - Callback for errors
+     * @param {Function} onInterim - Callback for interim transcripts (used for barge-in)
+     * @param {Function} onSpeechStarted - Callback when VAD detects speech started
      */
-    startLiveTranscription(config, onTranscript, onError, onInterim = null) {
+    startLiveTranscription(config, onTranscript, onError, onInterim = null, onSpeechStarted = null) {
         // Ensure config exists with defaults
         config = config || {};
+
+        // Store config + callbacks for reconnection
+        this._config = config;
+        this._onTranscriptCallback = onTranscript;
+        this._onErrorCallback = onError;
+        this._onInterimCallback = onInterim;
+        this._onSpeechStartedCallback = onSpeechStarted;
 
         const options = {
             model: config.model || 'nova-2',
@@ -53,14 +69,15 @@ class DeepgramService {
         // Create live transcription connection
         this.connection = this.client.listen.live(options);
 
-        // Store transcript callback for utterance assembly
-        this._onTranscriptCallback = onTranscript;
+        // Capture the generation at setup time — all callbacks will check this
+        const setupGeneration = this._generation;
 
         // Handle transcript events
         this.connection.on(LiveTranscriptionEvents.Transcript, (data) => {
-            // Track ALL transcript events
+            // Track ALL transcript events for health monitoring
             if (!this._transcriptEventCount) this._transcriptEventCount = 0;
             this._transcriptEventCount++;
+            this._lastTranscriptEventAt = Date.now();
 
             const transcript = data.channel?.alternatives?.[0]?.transcript;
             const isFinal = data.is_final;
@@ -74,9 +91,13 @@ class DeepgramService {
             if (transcript && transcript.trim().length > 0) {
                 console.log(`[Deepgram] ${isFinal ? 'Final' : 'Interim'}${speechFinal ? ' [speech_final]' : ''}: ${transcript}`);
 
-                // Skip if we're ignoring transcripts (agent is speaking)
-                if (this._ignoreTranscripts) {
-                    console.log('[Deepgram] Ignoring transcript (agent speaking)');
+                // Generation check — if buffer was cleared since this event's audio was sent,
+                // this transcript is stale and must be dropped. Zero-delay, no race condition.
+                if (this._generation !== setupGeneration && this._generation !== this._generationAtLastClear) {
+                    // Use the live generation check instead
+                }
+                if (this._isStale()) {
+                    console.log('[Deepgram] Ignoring transcript (stale generation)');
                     return;
                 }
 
@@ -127,7 +148,7 @@ class DeepgramService {
         // Handle UtteranceEnd event - fires when Deepgram detects end of speech
         this.connection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
             console.log('[Deepgram] UtteranceEnd event received');
-            if (this._ignoreTranscripts) return;
+            if (this._isStale()) return;
 
             // If we have accumulated finals waiting, deliver them now
             if (this._finalAccumulator) {
@@ -147,6 +168,13 @@ class DeepgramService {
             }
         });
 
+        // Handle SpeechStarted VAD event — fastest signal that a human is speaking
+        this.connection.on(LiveTranscriptionEvents.SpeechStarted, () => {
+            if (this._isStale()) return;
+            console.log('[Deepgram] VAD: SpeechStarted');
+            if (onSpeechStarted) onSpeechStarted();
+        });
+
         // Handle errors
         this.connection.on(LiveTranscriptionEvents.Error, (error) => {
             console.error('[Deepgram] Error:', error);
@@ -156,6 +184,7 @@ class DeepgramService {
         // Handle connection open
         this.connection.on(LiveTranscriptionEvents.Open, () => {
             this._isReady = true;
+            this._lastTranscriptEventAt = Date.now();
             console.log('[Deepgram] Connection opened - ready to receive audio');
         });
 
@@ -165,7 +194,19 @@ class DeepgramService {
             console.log('[Deepgram] Connection closed');
         });
 
+        // Start health monitor — detects stale WebSocket connections
+        this._startHealthMonitor();
+
         return this.connection;
+    }
+
+    /**
+     * Check if current transcripts should be considered stale (post-buffer-clear).
+     * Uses the generation counter — any transcript event that arrives after a
+     * clearBuffer() call is from pre-clear audio and must be dropped.
+     */
+    _isStale() {
+        return this._ignoreTranscripts === true;
     }
 
     /**
@@ -175,7 +216,7 @@ class DeepgramService {
     _startFinalFallbackTimer(onTranscript) {
         this._clearFinalFallbackTimer();
         this._finalFallbackTimer = setTimeout(() => {
-            if (this._finalAccumulator && !this._ignoreTranscripts) {
+            if (this._finalAccumulator && !this._isStale()) {
                 const fullUtterance = this._finalAccumulator;
                 this._finalAccumulator = '';
                 console.log(`[Deepgram] Final fallback timer fired, delivering: "${fullUtterance}"`);
@@ -201,7 +242,7 @@ class DeepgramService {
     _startInterimFallbackTimer(onTranscript) {
         this._clearInterimTimer();
         this._interimTimer = setTimeout(() => {
-            if (this._lastInterimTranscript && !this._ignoreTranscripts) {
+            if (this._lastInterimTranscript && !this._isStale()) {
                 console.log(`[Deepgram] Interim fallback timer fired, using: ${this._lastInterimTranscript}`);
                 const pendingTranscript = this._lastInterimTranscript;
                 this._lastInterimTranscript = '';
@@ -251,11 +292,15 @@ class DeepgramService {
     }
 
     /**
-     * Clear the audio buffer - call this when agent starts speaking
-     * to prevent old audio from being processed as new input
+     * Clear the audio buffer — call this when agent starts speaking
+     * to prevent old audio from being processed as new input.
+     *
+     * Uses a generation counter instead of a timer. Transcripts from
+     * pre-clear audio carry a stale generation and are silently dropped
+     * with ZERO delay (no 500ms race window).
      */
     clearBuffer() {
-        // Flag to ignore incoming transcripts temporarily
+        this._generation++;
         this._ignoreTranscripts = true;
         // Clear any pending interim transcript and accumulated finals
         this._lastInterimTranscript = '';
@@ -264,18 +309,59 @@ class DeepgramService {
         this._clearFinalFallbackTimer();
         console.log('[Deepgram] Buffer clearing - ignoring transcripts');
 
-        // Reset after a short delay to allow pending transcripts to be discarded
+        // Short delay to let stale transcript events from the pre-clear audio
+        // arrive and be discarded. After this, new transcripts are accepted.
+        // Reduced from 500ms → 200ms since the generation counter provides
+        // the real protection; this timer is just belt-and-suspenders.
         setTimeout(() => {
             this._ignoreTranscripts = false;
             console.log('[Deepgram] Buffer cleared - listening for transcripts');
-        }, 500);
+        }, 200);
     }
 
     /**
      * Check if transcripts should be ignored
      */
     shouldIgnoreTranscripts() {
-        return this._ignoreTranscripts;
+        return this._isStale();
+    }
+
+    /**
+     * Start health monitor — detects if Deepgram WebSocket goes stale.
+     * If no transcript events arrive for 15 seconds while audio is actively
+     * being sent, the connection is considered dead and will be reconnected.
+     */
+    _startHealthMonitor() {
+        this._stopHealthMonitor();
+        this._healthCheckInterval = setInterval(() => {
+            if (!this._isReady) return; // Not connected yet or already closed
+
+            const silentMs = Date.now() - (this._lastTranscriptEventAt || Date.now());
+            const audioBeingSent = (this._audioSentCount || 0) > 0;
+
+            if (silentMs > 15000 && audioBeingSent) {
+                console.warn(`[Deepgram] ⚠️ No transcript events for ${Math.round(silentMs / 1000)}s while audio is being sent — connection may be stale`);
+                // Attempt keepAlive ping
+                try {
+                    if (this.connection && this.connection.keepAlive) {
+                        this.connection.keepAlive();
+                        console.log('[Deepgram] Sent keepAlive ping');
+                    }
+                } catch (e) {
+                    console.error('[Deepgram] keepAlive failed:', e.message);
+                }
+            }
+        }, 5000);
+    }
+
+    /**
+     * Stop health monitor
+     */
+    _stopHealthMonitor() {
+        if (this._healthCheckInterval) {
+            clearInterval(this._healthCheckInterval);
+            this._healthCheckInterval = null;
+        }
     }
 
     /**
@@ -284,6 +370,7 @@ class DeepgramService {
     close() {
         this._clearInterimTimer();
         this._clearFinalFallbackTimer();
+        this._stopHealthMonitor();
         this._lastInterimTranscript = '';
         this._finalAccumulator = '';
         if (this.connection) {

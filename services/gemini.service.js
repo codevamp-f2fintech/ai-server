@@ -176,6 +176,7 @@ class GeminiService {
 
         // Start chat session — will be rebuilt each turn with capped history
         this.chat = this._buildChat([]);
+        this._lastResponseAt = Date.now(); // track turn timing for cache re-warm
         console.log('[Gemini] Conversation initialized');
     }
 
@@ -224,6 +225,16 @@ class GeminiService {
         try {
             console.log(`[Gemini] User: ${userMessage}`);
 
+            // --- CACHE RE-WARM on long silences ---
+            // Gemini's implicit prompt cache TTL is ~60s. If the user took >30s
+            // to reply, the cache may be expiring. Fire a background re-warm NOW
+            // (parallel with the real request) to pre-seed the cache for NEXT turn.
+            const silenceMs = Date.now() - (this._lastResponseAt || 0);
+            if (silenceMs > 30000) {
+                console.log(`[Gemini] ⚡ Long silence (${Math.round(silenceMs / 1000)}s) — firing background re-warm for next turn`);
+                this.warmUp().catch(() => {}); // fire-and-forget, never block
+            }
+
             // Add user message to history BEFORE building the chat so the
             // window includes the current turn's context
             this.conversationHistory.push({
@@ -240,12 +251,47 @@ class GeminiService {
 
             // Rebuild chat with capped history, then send the new user message
             this.chat = this._buildChat(windowHistory);
-            const result = await this.chat.sendMessageStream(userMessage);
+
+            // --- TIMEOUT WRAPPER ---
+            // Hard timeout: if sendMessageStream doesn't start within 12s, abort.
+            // This prevents the entire pipeline from hanging if Gemini is unresponsive.
+            const GEMINI_TIMEOUT_MS = 12000;
+            let geminiTimer;
+            const timeoutPromise = new Promise((_, reject) => {
+                geminiTimer = setTimeout(() => reject(new Error('Gemini API timeout (12s)')), GEMINI_TIMEOUT_MS);
+            });
+
+            let result;
+            try {
+                result = await Promise.race([
+                    this.chat.sendMessageStream(userMessage),
+                    timeoutPromise
+                ]);
+                clearTimeout(geminiTimer);
+            } catch (timeoutErr) {
+                clearTimeout(geminiTimer);
+                console.error(`[Gemini] ⚠️ ${timeoutErr.message}`);
+                // Return empty — orchestrator will use nudge retry
+                this.conversationHistory.push({ role: 'assistant', content: '' });
+                this._lastResponseAt = Date.now();
+                return '';
+            }
 
             let fullResponse = '';
 
-            // Process stream
+            // Process stream with per-chunk stall detection (5s between chunks)
+            const CHUNK_STALL_MS = 5000;
+            let lastChunkAt = Date.now();
+
             for await (const chunk of result.stream) {
+                // Stall detection: if Gemini stops sending tokens for 5s mid-stream, break
+                const chunkGap = Date.now() - lastChunkAt;
+                if (chunkGap > CHUNK_STALL_MS && fullResponse.length > 0) {
+                    console.warn(`[Gemini] ⚠️ Stream stalled (${Math.round(chunkGap / 1000)}s between chunks) — using partial response`);
+                    break;
+                }
+                lastChunkAt = Date.now();
+
                 const chunkText = chunk.text();
                 fullResponse += chunkText;
 
@@ -260,6 +306,7 @@ class GeminiService {
                 role: 'assistant',
                 content: fullResponse
             });
+            this._lastResponseAt = Date.now(); // update for next turn's cache check
 
             console.log(`[Gemini] Assistant: ${fullResponse}`);
             return fullResponse;
