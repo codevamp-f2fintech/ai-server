@@ -21,7 +21,7 @@ const cors = require('cors');
 const agentRoutes = require('./routes/agents');
 const voiceRoutes = require('./routes/voices');
 const fileRoutes = require('./routes/files');
-const phoneNumberRoutes = require('./routes/phone-numbers');
+const phoneNumberRoutes = require('./routes/phone-numbers-local'); // MongoDB-based (no VAPI)
 const credentialRoutes = require('./routes/credentials');
 const authRoutes = require('./routes/auth');
 const { authenticate } = require('./middleware/auth');
@@ -32,58 +32,28 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-teleca
   .catch(err => console.error('MongoDB connection error:', err));
 
 // Mongoose Call Schema and Model
-const callSchema = new mongoose.Schema({
-  _id: { type: String, alias: 'id' },
-  // Owner user ID for multi-tenant isolation
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  assistantId: String,
-  phoneNumberId: String,
-  type: String,
-  startedAt: Date,
-  endedAt: Date,
-  transcript: String,
-  recordingUrl: String,
-  summary: String,
-  createdAt: Date,
-  updatedAt: Date,
-  orgId: String,
-  cost: Number,
-  customer: {
-    number: String
-  },
-  status: String,
-  endedReason: String,
-  messages: [mongoose.Schema.Types.Mixed],
-  phoneCallProvider: String,
-  phoneCallProviderId: String,
-  phoneCallTransport: String,
-  monitor: {
-    listenUrl: String,
-    controlUrl: String
-  },
-  transport: {
-    callSid: String,
-    provider: String,
-    accountSid: String
-  },
-  // Agent tracking
-  agentId: String, // Reference to Agent._id
-  agentName: String // Agent name at time of call
-}, { _id: false, timestamps: true });
-
-const Call = mongoose.model('Call', callSchema);
+// Import Call model
+const Call = require('./models/Call');
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+app.use(express.urlencoded({ extended: true })); // For Twilio webhooks
 
-// Mount agent routes
+// Mount routes
 app.use('/vapi/agents', agentRoutes);
 app.use('/vapi/voices', voiceRoutes);
 app.use('/vapi/files', fileRoutes);
-app.use('/vapi/phone-numbers', phoneNumberRoutes);
+app.use('/api/phone-numbers', phoneNumberRoutes); // NEW: MongoDB-based phone numbers (no VAPI)
 app.use('/vapi/credentials', credentialRoutes);
 app.use('/auth', authRoutes);
+
+// NEW: Independent call routes (no VAPI dependency)
+const independentCallRoutes = require('./routes/independent-calls');
+app.use('/api/independent-calls', independentCallRoutes);
+// Mount webhooks at root level (Twilio expects /webhooks/twilio/*)
+app.use(independentCallRoutes);
+
 
 const VAPI_KEY = process.env.VAPI_KEY;
 if (!VAPI_KEY) {
@@ -176,6 +146,19 @@ app.get('/outbound-call-info/:id', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Call not found' });
     }
 
+    // Check if this is an independent call (Twilio SID format starts with CA/CS)
+    // or a VAPI call (UUID format)
+    const isTwilioCall = /^(CA|CS)[a-f0-9]{32}$/i.test(id);
+
+    if (isTwilioCall) {
+      // Independent call - return from MongoDB only (no VAPI API call)
+      if (!existingCall) {
+        return res.status(404).json({ error: 'Call not found' });
+      }
+      return res.status(200).json(existingCall);
+    }
+
+    // VAPI call - fetch from VAPI API
     const r = await axios.get(`${BASE}/call/${id}`, {
       headers: {
         Authorization: `Bearer ${VAPI_KEY}`,
@@ -281,7 +264,15 @@ app.post('/vapi/webhook', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+const server = app.listen(PORT, () => {
+  console.log(`Listening on ${PORT}`);
+
+  // Initialize WebSocket Media Stream Server
+  const MediaStreamServer = require('./websocket/media-stream.server');
+  const mediaStreamServer = new MediaStreamServer(server);
+  console.log('WebSocket Media Stream Server initialized');
+});
+
 
 server.on('error', (err) => {
   console.error('Server error:', err);

@@ -11,11 +11,20 @@ const agentSchema = new mongoose.Schema({
         index: true
     },
 
-    // VAPI Assistant ID
+    // VAPI Assistant ID (optional - only for legacy VAPI integration)
     vapiAssistantId: {
         type: String,
-        required: true,
-        unique: true,
+        required: false,
+        sparse: true, // Allow multiple null values
+        index: true
+    },
+
+    // Phone Number ID - reference to PhoneNumber model
+    // Used to determine which Twilio credentials to use for calls
+    phoneNumberId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'PhoneNumber',
+        required: false,
         index: true
     },
 
