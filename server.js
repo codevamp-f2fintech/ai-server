@@ -46,17 +46,24 @@ app.use('/vapi/voices', voiceRoutes);
 app.use('/vapi/files', fileRoutes);
 app.use('/api/phone-numbers', phoneNumberRoutes); // NEW: MongoDB-based phone numbers (no VAPI)
 app.use('/vapi/credentials', credentialRoutes);
-app.use('/auth', authRoutes);
+app.use('/auth', authRoutes); // Includes public Login and disabled Register
 
-// NEW: Independent call routes (no VAPI dependency)
-const independentCallRoutes = require('./routes/independent-calls');
-app.use('/api/independent-calls', independentCallRoutes);
+// --- PUBLIC WEBHOOKS (Designated public entry points) ---
+// Note: Webhooks are public by necessity but should be monitored.
+
+
 // Mount webhooks at root level (Twilio expects /webhooks/twilio/*)
+// Routes in independentCallRoutes that are NOT webhooks have internal authenticate middleware
 app.use(independentCallRoutes);
+
 
 // NEW: Queue-based Campaigns
 const campaignRoutes = require('./routes/campaigns');
 app.use('/api/campaigns', campaignRoutes);
+
+// --- PROTECTED GLOBAL ENDPOINTS ---
+// All routes below require the 'authenticate' middleware
+
 
 
 const VAPI_KEY = process.env.VAPI_KEY; // Optional - only used by legacy VAPI proxy routes

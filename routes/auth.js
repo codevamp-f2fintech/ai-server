@@ -6,9 +6,15 @@ const { authenticate, generateTokens } = require('../middleware/auth');
 
 /**
  * POST /auth/register
- * Register a new user
+ * [DISABLED] Register a new user
  */
 router.post('/register', async (req, res) => {
+    return res.status(403).json({
+        error: 'Registration disabled',
+        message: 'New user registration is currently disabled. Please contact support.'
+    });
+    /* Original implementation below for reference
+
     try {
         const { email, password, name, phone } = req.body;
 
@@ -77,6 +83,7 @@ router.post('/register', async (req, res) => {
             message: error.message
         });
     }
+    */
 });
 
 /**

@@ -5,6 +5,10 @@ const router = express.Router();
 const ElevenLabsService = require('../services/elevenlabs.service');
 const ChatterboxService = require('../services/chatterbox.service');
 const db = require('../db');
+const { authenticate } = require('../middleware/auth');
+
+// Apply authentication middleware to ALL routes
+router.use(authenticate);
 
 /**
  * GET /vapi/voices/chatterbox
