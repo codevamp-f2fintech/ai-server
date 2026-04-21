@@ -7,8 +7,8 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('unhandledRejection', { reason, promise });
 });
 
-// Load environment variables from .env file
-require('dotenv').config();
+// Load environment variables from .env file, forcing override of any cached system variables
+require('dotenv').config({ override: true });
 
 // Requires: npm i express axios body-parser
 const express = require('express');
@@ -27,7 +27,9 @@ const authRoutes = require('./routes/auth');
 const { authenticate } = require('./middleware/auth');
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-telecaller')
+// Force Google DNS to bypass Windows/ISP SRV ECONNREFUSED bugs
+require('dns').setServers(['8.8.8.8', '8.8.4.4']);
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB connection error:', err));
 
@@ -54,12 +56,21 @@ app.use('/auth', authRoutes); // Includes public Login and disabled Register
 
 // Mount webhooks at root level (Twilio expects /webhooks/twilio/*)
 // Routes in independentCallRoutes that are NOT webhooks have internal authenticate middleware
+const independentCallRoutes = require('./routes/independent-calls');
 app.use(independentCallRoutes);
 
 
 // NEW: Queue-based Campaigns
 const campaignRoutes = require('./routes/campaigns');
 app.use('/api/campaigns', campaignRoutes);
+
+// NEW: Manual Calling
+const manualCallRoutes = require('./routes/manual-calls');
+app.use('/api/manual-calls', manualCallRoutes);
+
+// NEW: Global Lead management
+const leadRoutes = require('./routes/leads');
+app.use('/api/leads', leadRoutes);
 
 // --- PROTECTED GLOBAL ENDPOINTS ---
 // All routes below require the 'authenticate' middleware
@@ -222,12 +233,14 @@ app.get('/calls/list', authenticate, async (req, res) => {
                   { $ifNull: ['$durationSeconds', 0] },
                   {
                     $cond: [
-                      { $and: [
-                        { $ne: [{ $type: '$startedAt' }, 'missing'] },
-                        { $ne: [{ $type: '$endedAt' }, 'missing'] },
-                        { $ne: ['$startedAt', null] },
-                        { $ne: ['$endedAt', null] }
-                      ]},
+                      {
+                        $and: [
+                          { $ne: [{ $type: '$startedAt' }, 'missing'] },
+                          { $ne: [{ $type: '$endedAt' }, 'missing'] },
+                          { $ne: ['$startedAt', null] },
+                          { $ne: ['$endedAt', null] }
+                        ]
+                      },
                       { $divide: [{ $subtract: ['$endedAt', '$startedAt'] }, 1000] },
                       0
                     ]
@@ -276,9 +289,9 @@ app.post('/calls/bulk-delete', authenticate, async (req, res) => {
 app.get('/leads/list', authenticate, async (req, res) => {
   try {
     const { agentId } = req.query;
-    let query = { 
+    let query = {
       userId: req.userId,
-      leadStatus: { $in: ['interested', 'follow-up'] } 
+      leadStatus: { $in: ['interested', 'follow-up'] }
     };
 
     if (agentId) {
@@ -377,10 +390,15 @@ const server = app.listen(PORT, () => {
   const mediaStreamServer = new MediaStreamServer(server);
   console.log('WebSocket Media Stream Server initialized');
 
+  // Initialize WebSocket Manual Call Server
+  const ManualCallServer = require('./websocket/manual-call.server');
+  const manualCallServer = new ManualCallServer(server);
+  console.log('WebSocket Manual Call Server initialized');
+
   // Start Background Campaign Queue Processor
   const { startProcessor } = require('./services/campaign.processor');
   const CampaignCache = require('./services/campaign.cache');
-  
+
   // Rescue any hanging leads before starting the processor
   CampaignCache.rescueHangingLeads()
     .then(() => startProcessor())

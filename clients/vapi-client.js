@@ -8,9 +8,9 @@ const VAPI_BASE_URL = 'https://api.vapi.ai';
 class VapiClient {
   constructor(apiKey) {
     if (!apiKey) {
-      throw new Error('VAPI API key is required');
+      console.warn('[VapiClient] VAPI API key is not provided. Legacy VAPI endpoints will fail.');
     }
-    this.apiKey = apiKey;
+    this.apiKey = apiKey || '';
     this.client = axios.create({
       baseURL: VAPI_BASE_URL,
       headers: {
