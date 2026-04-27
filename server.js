@@ -54,9 +54,14 @@ app.use('/auth', authRoutes); // Includes public Login and disabled Register
 // Note: Webhooks are public by necessity but should be monitored.
 
 
+// Independent call routes
+const independentCallRoutes = require('./routes/independent-calls');
+
+// Mount API routes for independent calls (used by frontend)
+app.use('/api/independent-calls', independentCallRoutes);
+
 // Mount webhooks at root level (Twilio expects /webhooks/twilio/*)
 // Routes in independentCallRoutes that are NOT webhooks have internal authenticate middleware
-const independentCallRoutes = require('./routes/independent-calls');
 app.use(independentCallRoutes);
 
 
