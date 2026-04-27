@@ -834,7 +834,12 @@ class SipTrunkService extends EventEmitter {
                             }
                         }
 
-                        socket.send(ack, ackTargetPort, ackTargetIp);
+                        // Build ACK on-the-fly (can't reuse 'ack' — it's declared later in this scope)
+                        const dupAck = this.createAckRequest(
+                            toNumber, callId, fromTag, callData.toTag, callData.cseq,
+                            localIp, callData.localSipPort, callData.contactUri, callData.recordRoute
+                        );
+                        socket.send(dupAck, ackTargetPort, ackTargetIp);
                         return;
                     }
                     callData.answered = true;

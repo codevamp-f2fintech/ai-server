@@ -147,6 +147,9 @@ class SipMediaBridge {
             this.recordingService.addAudioChunk(internalCallId, audioForStt, 'caller');
 
             // Send to orchestrator for speech-to-text
+            // NOTE: the third argument in older versions was onError, now we need to make sure
+            // orchestrator routes the VAD event correctly. We don't actually need to hook it here;
+            // orchestrator registers its own callbacks in startListening.
             orchestrator.processIncomingAudio(audioForStt);
         };
 

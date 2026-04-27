@@ -35,6 +35,20 @@ class ElevenLabsService {
      */
     async textToSpeechStream(text, config, onAudioChunk) {
         this._stopped = false;
+
+        // Create AbortController for immediate HTTP cancellation on stop()
+        const abortController = new AbortController();
+        this._currentAbortController = abortController;
+
+        // Request-level timeout: if ElevenLabs doesn't START streaming within 10s, abort
+        const REQUEST_TIMEOUT_MS = 10000;
+        const requestTimeoutId = setTimeout(() => {
+            if (!this._stopped) {
+                console.warn('[ElevenLabs] ⚠️ Request timeout (10s) — aborting');
+                abortController.abort();
+            }
+        }, REQUEST_TIMEOUT_MS);
+
         try {
             // Ensure config exists with defaults
             config = config || {};
@@ -84,17 +98,21 @@ class ElevenLabsService {
 
             console.log(`[ElevenLabs] Model: ${modelId}, V3: ${isV3}, Request:`, JSON.stringify(requestBody).substring(0, 200));
 
-            // Generate audio stream
+            // Generate audio stream — pass abort signal for immediate cancellation
             const audioStream = await this.client.textToSpeech.convertAsStream(
                 voiceId,
-                requestBody
+                requestBody,
+                { abortSignal: abortController.signal }
             );
+
+            // First byte received — clear the request timeout
+            clearTimeout(requestTimeoutId);
 
             // Process audio chunks
             for await (const chunk of audioStream) {
-                // CRITICAL: Stop processing if call ended
-                if (this._stopped) {
-                    console.log('[ElevenLabs] Aborting TTS stream - call ended');
+                // CRITICAL: Stop processing if call ended or barge-in
+                if (this._stopped || abortController.signal.aborted) {
+                    console.log('[ElevenLabs] Aborting TTS stream - stopped/aborted');
                     break;
                 }
                 if (onAudioChunk) {
@@ -106,6 +124,13 @@ class ElevenLabsService {
 
             console.log('[ElevenLabs] Audio generation complete');
         } catch (error) {
+            clearTimeout(requestTimeoutId);
+
+            // AbortError is expected when stop() is called — rethrow as timeout
+            if (error.name === 'AbortError' || abortController.signal.aborted) {
+                throw new Error('timeout');
+            }
+
             console.error('[ElevenLabs] Error generating speech:', error.message);
 
             // Try to extract more details from the error
@@ -117,6 +142,12 @@ class ElevenLabsService {
             }
 
             throw error;
+        } finally {
+            clearTimeout(requestTimeoutId);
+            // Clean up controller reference
+            if (this._currentAbortController === abortController) {
+                this._currentAbortController = null;
+            }
         }
     }
 
@@ -266,6 +297,11 @@ class ElevenLabsService {
      */
     stop() {
         this._stopped = true; // Signal the for-await loop to break
+        // Immediately kill the HTTP connection — don't just set a flag
+        if (this._currentAbortController) {
+            this._currentAbortController.abort();
+            this._currentAbortController = null;
+        }
         if (this.currentStream) {
             this.currentStream.destroy();
             this.currentStream = null;

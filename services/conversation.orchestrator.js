@@ -120,6 +120,24 @@ class ConversationOrchestrator extends EventEmitter {
         // Audio buffer for TTS
         this.audioQueue = [];
         this.isSpeaking = false;
+
+        // --- 3-LAYER BARGE-IN ENGINE ---
+        // Layer 1: Echo suppression — track last time we sent TTS audio downstream
+        this._lastAudioEmittedAt = 0;
+        // Layer 2: VAD gate — set by Deepgram SpeechStarted callback
+        this._vadSpeechDetected = false;
+        // Layer 3: Filler word ignore list (single words that should never trigger barge-in)
+        this._fillerWords = new Set([
+            'हां', 'जी', 'ok', 'hmm', 'uh', 'umm', 'अच्छा', 'बोलो',
+            'हम्म', 'ओके', 'yeah', 'yes', 'no', 'नहीं', 'sir', 'haan',
+            'hello', 'ha', 'han', 'nahi', 'mm', 'ah', 'acha'
+        ]);
+        // Echo suppression window (ms) — any voice within this window after last audio is echo
+        this._ECHO_WINDOW_MS = 500;
+
+        // --- HANG PREVENTION ---
+        this._watchdogTimer = null;
+        this._responseDepth = 0; // Prevents recursive getAIResponse stacking
     }
 
     /**
@@ -208,25 +226,75 @@ class ConversationOrchestrator extends EventEmitter {
             this.agentConfig.transcriber,
             (transcript) => this.onUserSpeech(transcript),
             (error) => this.onError(error),
-            // Interim callback - reset silence timer when user starts speaking
+            // Interim callback — used for barge-in detection
             (interimTranscript) => {
                 console.log(`[Orchestrator] User speaking (interim): ${interimTranscript}`);
                 this.resetSilenceTimer();
 
-                // Barge-in: if user speaks while agent is speaking, stop and listen
-                // BUT: never barge-in during the first greeting message
-                if (this.state === 'speaking' && !this._bargeInTriggered && !this._speakingFirstMessage) {
-                    this._bargeInTriggered = true;
-                    console.log(`[Orchestrator] Barge-in detected! User interrupted — stopping speech to listen`);
-                    // Stop TTS generation
-                    if (this.tts) this.tts.stop();
-                    // Signal SipMediaBridge to clear outgoing audio queue
-                    this.emit('barge_in');
-                    // Transition to listening
-                    this.state = 'listening';
-                } else if (this.state === 'speaking' && this._speakingFirstMessage) {
-                    console.log(`[Orchestrator] Barge-in blocked — first message is protected`);
+                // ═══════════════════════════════════════════════════════
+                // 3-LAYER BARGE-IN ENGINE
+                // Only fires if ALL 3 layers pass. Any single layer
+                // rejecting the transcript suppresses barge-in.
+                // ═══════════════════════════════════════════════════════
+
+                if (this.state !== 'speaking' || this._bargeInTriggered || this._speakingFirstMessage) {
+                    if (this.state === 'speaking' && this._speakingFirstMessage) {
+                        console.log(`[Orchestrator] Barge-in blocked — first message is protected`);
+                    }
+                    return;
                 }
+
+                // --- LAYER 1: Echo Suppression Window ---
+                // Any voice detected within 500ms of the last TTS audio packet
+                // is almost certainly echo of the agent's own speech leaking
+                // back through the SIP trunk.
+                const msSinceLastAudio = Date.now() - (this._lastAudioEmittedAt || 0);
+                if (msSinceLastAudio < this._ECHO_WINDOW_MS) {
+                    console.log(`[Orchestrator] Barge-in SUPPRESSED [Layer 1: echo window] — ${msSinceLastAudio}ms since last audio (<${this._ECHO_WINDOW_MS}ms)`);
+                    return;
+                }
+
+                // --- LAYER 2: VAD-Confirmed Speech Gate ---
+                // Deepgram must have fired a SpeechStarted event since
+                // the agent started speaking. This filters out STT
+                // hallucinations and noise that produce transcripts
+                // without actual voice activity.
+                if (!this._vadSpeechDetected) {
+                    console.log(`[Orchestrator] Barge-in SUPPRESSED [Layer 2: no VAD speech event]`);
+                    return;
+                }
+
+                // --- LAYER 3: Semantic Strength + Filler Word Filter ---
+                const words = interimTranscript.trim().split(/\s+/);
+                const cleanChars = interimTranscript.trim().replace(/[।.!?,\s]/g, '').length;
+
+                // Single filler word alone → never barge-in
+                if (words.length === 1 && this._fillerWords.has(words[0].toLowerCase())) {
+                    console.log(`[Orchestrator] Barge-in SUPPRESSED [Layer 3: filler word] — "${words[0]}"`);
+                    return;
+                }
+
+                // Must pass word/char threshold
+                if (words.length < 2 && cleanChars < 6) {
+                    console.log(`[Orchestrator] Barge-in SUPPRESSED [Layer 3: too short] — ${words.length} word(s), ${cleanChars} chars: "${interimTranscript}"`);
+                    return;
+                }
+
+                // ═══ ALL 3 LAYERS PASSED — EXECUTE BARGE-IN ═══
+                this._bargeInTriggered = true;
+                console.log(`[Orchestrator] ✅ Barge-in CONFIRMED — ${words.length} words, ${cleanChars} chars, VAD+, echo clear (${msSinceLastAudio}ms) — stopping speech to listen`);
+
+                // Stop TTS generation immediately
+                if (this.tts) this.tts.stop();
+                // Signal SipMediaBridge to clear outgoing audio queue
+                this.emit('barge_in');
+                // Transition to listening
+                this.state = 'listening';
+            },
+            // SpeechStarted callback — VAD Layer 2 gate
+            () => {
+                this._vadSpeechDetected = true;
+                console.log('[Orchestrator] VAD: SpeechStarted event received');
             }
         );
 
@@ -369,11 +437,23 @@ class ConversationOrchestrator extends EventEmitter {
     async getAIResponse(userMessage) {
         if (this._aborted) return;
 
+        // --- HANG PREVENTION: Recursive depth guard ---
+        // Prevents nudge retry loops from chaining endlessly
+        this._responseDepth = (this._responseDepth || 0) + 1;
+        if (this._responseDepth > 2) {
+            console.warn('[Orchestrator] ⚠️ getAIResponse recursion limit (2) reached — aborting to listen state');
+            this._responseDepth = 0;
+            this.state = 'listening';
+            this.startSilenceTimer();
+            return;
+        }
+
         this.clearSilenceTimer(); // Ensure we don't timeout while thinking or speaking
         this.state = 'thinking';
         this._isThinking = true;
         this._bargeInTriggered = false; // Reset barge-in flag for new response
         this.emit('thinking');
+        this._startWatchdog(); // 20s hard limit on this turn
 
         // CRITICAL: Clear Deepgram buffer immediately so stale audio from before
         // the user finished speaking is discarded
@@ -466,29 +546,43 @@ class ConversationOrchestrator extends EventEmitter {
                         this.deepgram.clearBuffer();
                     }
 
-                    // 1. Drain already buffered chunks
-                    while (sentenceChunks.length > 0) {
-                        if (this._aborted || this._bargeInTriggered) break;
-                        this.onAudioChunk(sentenceChunks.shift());
-                    }
+                    // --- HANG PREVENTION: TTS Sentence Timeout ---
+                    // If ElevenLabs (or custom TTS) hangs and never calls activeOutputCallback(null),
+                    // this Promise will hang forever, deadlocking the call. We wrap it in an 8s timeout.
+                    const sentenceDeliveryPromise = (async () => {
+                        // 1. Drain already buffered chunks
+                        while (sentenceChunks.length > 0) {
+                            if (this._aborted || this._bargeInTriggered) break;
+                            this.onAudioChunk(sentenceChunks.shift());
+                        }
 
-                    // 2. If TTS stream is still running, pipe incoming chunks directly to output
-                    if (!streamDone && !this._aborted && !this._bargeInTriggered) {
-                        await new Promise(resolve => {
-                            activeOutputCallback = (chunk) => {
-                                if (chunk === null) {
-                                    resolve();
-                                } else {
-                                    if (!this._aborted && !this._bargeInTriggered) {
-                                        this.onAudioChunk(chunk);
+                        // 2. If TTS stream is still running, pipe incoming chunks directly to output
+                        if (!streamDone && !this._aborted && !this._bargeInTriggered) {
+                            await new Promise(resolve => {
+                                activeOutputCallback = (chunk) => {
+                                    if (chunk === null) {
+                                        resolve();
+                                    } else {
+                                        if (!this._aborted && !this._bargeInTriggered) {
+                                            this.onAudioChunk(chunk);
+                                        }
                                     }
-                                }
-                            };
-                        });
-                    }
+                                };
+                            });
+                        }
+                    })();
 
-                    console.log(`[⏱ LATENCY] Sentence playback delivered: ${text.substring(0, 30)}...`);
-                    if (!this._aborted) this.emit('audio_flush');
+                    const sentenceTimeoutPromise = new Promise((_, reject) => {
+                        setTimeout(() => reject(new Error('TTS sentence timeout')), 8000);
+                    });
+
+                    try {
+                        await Promise.race([sentenceDeliveryPromise, sentenceTimeoutPromise]);
+                        console.log(`[⏱ LATENCY] Sentence playback delivered: ${text.substring(0, 30)}...`);
+                        if (!this._aborted) this.emit('audio_flush');
+                    } catch (e) {
+                        console.warn(`[Orchestrator] ⚠️ Skipping hung TTS sentence ("${text.substring(0, 30)}..."): ${e.message}`);
+                    }
                 });
             };
 
@@ -650,8 +744,11 @@ class ConversationOrchestrator extends EventEmitter {
                 this.once('playback_complete', onWaitEnd);
                 this.once('user_speech', onWaitEnd);
 
-                // Safety timeout
-                const timeout = setTimeout(() => finish(), 15000);
+                // Safety timeout — REDUCED to 8s (was 15s)
+                const timeout = setTimeout(() => {
+                    console.warn('[Orchestrator] ⚠️ Playback wait timeout (8s) — forcing transition to listening');
+                    finish();
+                }, 8000);
             });
 
             if (this._aborted) {
@@ -689,6 +786,8 @@ class ConversationOrchestrator extends EventEmitter {
         } finally {
             this._isThinking = false;
             this._abortCurrentResponse = false;
+            this._responseDepth = Math.max(0, (this._responseDepth || 1) - 1);
+            this._clearWatchdog();
         }
     }
 
@@ -778,6 +877,8 @@ class ConversationOrchestrator extends EventEmitter {
     onAudioChunk(audioChunk) {
         // CRITICAL: Don't emit audio if call is ended
         if (this._aborted) return;
+        // Track emission time for Layer 1 Echo Suppression Window
+        this._lastAudioEmittedAt = Date.now();
         // Emit audio chunk to be sent to phone call
         this.emit('audio', audioChunk);
     }
@@ -892,6 +993,32 @@ class ConversationOrchestrator extends EventEmitter {
             messageCount: this.conversationLog.length,
             conversationLog: this.conversationLog
         });
+    }
+
+    // --- HANG PREVENTION: Watchdog Timer ---
+    // Start when entering 'thinking' state, reset on state transitions.
+    // If the orchestrator gets stuck in thinking/speaking for >20s (e.g. frozen TTS),
+    // this recovers the loop so the call doesn't just go dead.
+    _startWatchdog() {
+        this._clearWatchdog();
+        this._watchdogTimer = setTimeout(() => {
+            if (this.state === 'thinking' || this.state === 'speaking') {
+                console.error(`[Orchestrator] ⚠️ WATCHDOG: Agent stuck in '${this.state}' for 20s — force-recovering to listening state`);
+                this._isThinking = false;
+                this._bargeInTriggered = false;
+                this._abortCurrentResponse = false;
+                this.state = 'listening';
+                this.startSilenceTimer();
+                this.emit('audio_flush');
+            }
+        }, 20000);  // 20s hard limit for any single turn
+    }
+
+    _clearWatchdog() {
+        if (this._watchdogTimer) {
+            clearTimeout(this._watchdogTimer);
+            this._watchdogTimer = null;
+        }
     }
 
     /**
