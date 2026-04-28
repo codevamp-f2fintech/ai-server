@@ -3,6 +3,32 @@
 // Uses UDP for SIP signaling and RTP for audio transport
 
 const dgram = require('dgram');
+
+// --- START FULL SIP LOGGING PATCH ---
+// Intercept all UDP sockets to log outgoing SIP packets
+const originalCreateSocket = dgram.createSocket;
+dgram.createSocket = function(...args) {
+    const socket = originalCreateSocket.apply(this, args);
+    const originalSend = socket.send;
+    socket.send = function(...sendArgs) {
+        const msg = sendArgs[0];
+        if (msg) {
+            const msgStr = msg.toString();
+            // Only log SIP signaling packets, ignore binary RTP media packets
+            if (msgStr.includes('SIP/2.0') || msgStr.startsWith('INVITE') || msgStr.startsWith('REGISTER')) {
+                console.log('\n======================================================');
+                console.log('[SipTrunk] ⬆️ OUTGOING SIP PACKET ⬆️');
+                console.log('------------------------------------------------------');
+                console.log(msgStr);
+                console.log('======================================================\n');
+            }
+        }
+        return originalSend.apply(this, sendArgs);
+    };
+    return socket;
+};
+// --- END FULL SIP LOGGING PATCH ---
+
 const crypto = require('crypto');
 const EventEmitter = require('events');
 
@@ -494,6 +520,13 @@ class SipTrunkService extends EventEmitter {
      */
     parseSipResponse(data) {
         const dataStr = data.toString();
+        
+        console.log('\n======================================================');
+        console.log('[SipTrunk] ⬇️ INCOMING SIP PACKET ⬇️');
+        console.log('------------------------------------------------------');
+        console.log(dataStr);
+        console.log('======================================================\n');
+        
         const lines = dataStr.split('\r\n');
         const response = {};
 
