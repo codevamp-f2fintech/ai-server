@@ -653,19 +653,33 @@ class SipTrunkService extends EventEmitter {
      * @returns {Promise<Object>} - Call object with SIP call-id
      */
     async makeCall(toNumber, internalCallId) {
-        // First, register with SIP server if not already registered
+        // First, check if we need to register
         let localIp, sipSocket, localSipPort;
 
         try {
-            console.log('[SipTrunk] Registering before making call...');
-            const registrationResult = await this.register();
-            sipSocket = registrationResult.socket;
-            localSipPort = registrationResult.localSipPort;
-            localIp = registrationResult.localIp;
-            console.log('[SipTrunk] Registration complete, proceeding with call');
+            if (this.serverIp && this.serverIp.includes('twilio.com')) {
+                console.log('[SipTrunk] Twilio provider detected, skipping REGISTER step...');
+                const internalIp = await this.getLocalIp();
+                localIp = await this.getPublicIp() || internalIp;
+                
+                // Just create and bind a socket directly without registering
+                sipSocket = await new Promise((resolve, reject) => {
+                    const socket = dgram.createSocket('udp4');
+                    socket.bind(0, () => resolve(socket));
+                    socket.on('error', reject);
+                });
+                localSipPort = sipSocket.address().port;
+            } else {
+                console.log('[SipTrunk] Registering before making call...');
+                const registrationResult = await this.register();
+                sipSocket = registrationResult.socket;
+                localSipPort = registrationResult.localSipPort;
+                localIp = registrationResult.localIp;
+                console.log('[SipTrunk] Registration complete, proceeding with call');
+            }
         } catch (regError) {
-            console.error('[SipTrunk] Registration failed:', regError.message);
-            throw new Error(`Registration failed: ${regError.message}`);
+            console.error('[SipTrunk] Setup/Registration failed:', regError.message);
+            throw new Error(`Setup/Registration failed: ${regError.message}`);
         }
 
         const rtpPort = this.getNextRtpPort();
