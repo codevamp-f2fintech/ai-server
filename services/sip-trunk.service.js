@@ -492,6 +492,7 @@ class SipTrunkService extends EventEmitter {
         ].join('\r\n');
 
         const authHeader = `Digest username="${this.username}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${response}", algorithm=MD5`;
+        const authHeaderName = authParams.isProxy ? 'Proxy-Authorization' : 'Authorization';
 
         const sipRequest = [
             `INVITE ${uri} SIP/2.0`,
@@ -503,7 +504,7 @@ class SipTrunkService extends EventEmitter {
             `CSeq: ${cseq} INVITE`,
             `Contact: <sip:${this.username}@${localIp}:${localSipPort}>`,
             `P-Asserted-Identity: <sip:${cleanFrom}@${this.serverIp}>`,
-            `Authorization: ${authHeader}`,
+            `${authHeaderName}: ${authHeader}`,
             `Content-Type: application/sdp`,
             `Content-Length: ${sdp.length}`,
             `User-Agent: VaniVoiceAI/1.0`,
@@ -570,15 +571,16 @@ class SipTrunkService extends EventEmitter {
             }
         }
 
-        // Parse WWW-Authenticate if present
-        if (response.headers['www-authenticate']) {
-            const authHeader = response.headers['www-authenticate'];
+        // Parse WWW-Authenticate or Proxy-Authenticate if present
+        const authHeaderStr = response.headers['www-authenticate'] || response.headers['proxy-authenticate'];
+        if (authHeaderStr) {
             response.authParams = {};
+            response.authParams.isProxy = !!response.headers['proxy-authenticate'];
 
-            const realmMatch = authHeader.match(/realm="([^"]+)"/);
+            const realmMatch = authHeaderStr.match(/realm="([^"]+)"/);
             if (realmMatch) response.authParams.realm = realmMatch[1];
 
-            const nonceMatch = authHeader.match(/nonce="([^"]+)"/);
+            const nonceMatch = authHeaderStr.match(/nonce="([^"]+)"/);
             if (nonceMatch) response.authParams.nonce = nonceMatch[1];
         }
 
