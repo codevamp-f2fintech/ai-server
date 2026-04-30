@@ -310,25 +310,31 @@ class SipTrunkService extends EventEmitter {
      * @param {number} localSipPort - The actual local SIP port (ephemeral or bound)
      */
     createInviteRequest(toNumber, callId, fromTag, cseq, localIp, rtpPort, localSipPort = 5060) {
-        // Format the destination number for the Request-URI.
-        // Twilio PSTN (Elastic SIP Trunk) requires the full E.164 number WITH country code
-        // e.g. +918267818161 → 918267818161  (just strip the leading +)
-        // Legacy SIP PBX / MicroSIP expects 10-digit local format (strip country code too).
+        // Format numbers for the Request-URI and P-Asserted-Identity.
+        //
+        // Twilio Elastic SIP Trunk REQUIRES E.164 WITH the leading '+' in the Request-URI:
+        //   sip:+918267818161@vani-outbound.pstn.twilio.com  ← correct
+        //   sip:918267818161@vani-outbound.pstn.twilio.com   ← rejected (error 32101)
+        //
+        // Non-Twilio SIP PBX / MicroSIP expects 10-digit local format (no + no country code).
         const isTwilio = this.serverIp && this.serverIp.toLowerCase().includes('twilio.com');
-        let cleanTo = toNumber.replace(/^\+/, '');   // always strip leading +
-        if (!isTwilio) {
-            // Non-Twilio PBX: strip 91 country code for India numbers
-            if (cleanTo.startsWith('91') && cleanTo.length > 10) {
-                cleanTo = cleanTo.substring(2);
-            }
-        }
-        const cleanFrom = this.fromNumber.replace(/^\+/, '');
 
-        const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
-        // Use username as the SIP identity (matches registered identity)
+        let cleanTo, cleanFrom;
+        if (isTwilio) {
+            // Keep full E.164 with + for Twilio
+            cleanTo   = toNumber.startsWith('+') ? toNumber : '+' + toNumber;
+            cleanFrom = this.fromNumber.startsWith('+') ? this.fromNumber : '+' + this.fromNumber;
+        } else {
+            // Legacy PBX: strip + and country code
+            cleanTo = toNumber.replace(/^\+/, '');
+            if (cleanTo.startsWith('91') && cleanTo.length > 10) cleanTo = cleanTo.substring(2);
+            cleanFrom = this.fromNumber.replace(/^\+/, '');
+        }
+
+        const uri     = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
         const fromUri = `sip:${this.username}@${this.serverIp}`;
-        const toUri = `sip:${cleanTo}@${this.serverIp}`;
-        const branch = this.generateBranch();
+        const toUri   = `sip:${cleanTo}@${this.serverIp}`;
+        const branch  = this.generateBranch();
 
         console.log('[SipTrunk] Creating INVITE:');
         console.log(`  Request-URI: ${uri}`);
@@ -466,22 +472,24 @@ class SipTrunkService extends EventEmitter {
      * @param {number} localSipPort - The actual local SIP port (ephemeral or bound)
      */
     createAuthenticatedInvite(toNumber, callId, fromTag, cseq, localIp, rtpPort, authParams, localSipPort = 5060) {
-        // Format the destination number for the Request-URI — must match createInviteRequest logic.
-        // Twilio PSTN requires full E.164 WITH country code; only strip the leading +.
-        // Non-Twilio PBX: also strip the country code (legacy 10-digit format).
+        // MUST match createInviteRequest number-formatting logic exactly.
+        // Twilio requires E.164 WITH leading '+' in the Request-URI.
         const isTwilio = this.serverIp && this.serverIp.toLowerCase().includes('twilio.com');
-        let cleanTo = toNumber.replace(/^\+/, '');   // always strip leading +
-        if (!isTwilio) {
-            if (cleanTo.startsWith('91') && cleanTo.length > 10) {
-                cleanTo = cleanTo.substring(2);
-            }
+
+        let cleanTo, cleanFrom;
+        if (isTwilio) {
+            cleanTo   = toNumber.startsWith('+') ? toNumber : '+' + toNumber;
+            cleanFrom = this.fromNumber.startsWith('+') ? this.fromNumber : '+' + this.fromNumber;
+        } else {
+            cleanTo = toNumber.replace(/^\+/, '');
+            if (cleanTo.startsWith('91') && cleanTo.length > 10) cleanTo = cleanTo.substring(2);
+            cleanFrom = this.fromNumber.replace(/^\+/, '');
         }
-        const cleanFrom = this.fromNumber.replace(/^\+/, '');
-        const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
-        // Use username as the SIP identity (matches registered identity)
+
+        const uri     = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
         const fromUri = `sip:${this.username}@${this.serverIp}`;
-        const toUri = `sip:${cleanTo}@${this.serverIp}`;
-        const branch = this.generateBranch();
+        const toUri   = `sip:${cleanTo}@${this.serverIp}`;
+        const branch  = this.generateBranch();
 
         // Use authUsername/authPassword for Digest (Twilio Credential List credentials).
         // IMPORTANT: For Twilio Elastic SIP Trunks, 'username' in Proxy-Authorization
