@@ -381,6 +381,37 @@ class DeepgramService {
     }
 
     /**
+     * Transcribe pre-recorded audio file and return words with timestamps
+     * @param {Buffer} audioBuffer - Audio file buffer (WAV/MULAW)
+     * @param {Object} options - Transcription options (language, words)
+     * @returns {{ transcript: string, words: Array<{word, start, end}> }}
+     */
+    async transcribeWithWords(audioBuffer, options = {}) {
+        try {
+            const { result } = await this.client.listen.prerecorded.transcribeFile(
+                audioBuffer,
+                {
+                    model: options.model || 'nova-2',
+                    language: options.language || 'hi',
+                    punctuate: true,
+                    smart_format: true,
+                    numerals: options.numerals !== false,
+                    words: true   // Request word-level timestamps
+                }
+            );
+
+            const alt = result.results?.channels?.[0]?.alternatives?.[0];
+            return {
+                transcript: alt?.transcript || '',
+                words: alt?.words || []
+            };
+        } catch (error) {
+            console.error('[Deepgram] transcribeWithWords error:', error);
+            return { transcript: '', words: [] };
+        }
+    }
+
+    /**
      * Transcribe pre-recorded audio file
      * @param {Buffer} audioBuffer - Audio file buffer
      * @param {Object} options - Transcription options

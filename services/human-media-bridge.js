@@ -39,12 +39,16 @@ class HumanMediaBridge {
                     ws: null,
                     startTime: Date.now(),
                     audioPacketCount: 0,
-                    wsPacketCount: 0
+                    wsPacketCount: 0,
+                    callerChunks: [],  // Raw μ-law audio from PSTN (for separate transcription)
+                    agentChunks: []    // Raw μ-law audio from browser mic (for separate transcription)
                 };
                 this.activeSessions.set(internalCallId, session);
             } else {
                 session.sipService = sipService;
                 session.sipCallId = sipCallId;
+                session.callerChunks = session.callerChunks || [];
+                session.agentChunks  = session.agentChunks  || [];
             }
 
             // Start recording
@@ -111,10 +115,12 @@ class HumanMediaBridge {
                     console.log(`[HumanMediaBridge] Sent audio to WS: packet #${session.wsSendCount}, bytes: ${audioMuLaw.length}`);
                 }
             } else if (session.audioPacketCount % 100 === 0) {
-                // Log why audio isn't being sent
                 const wsState = session.ws ? session.ws.readyState : 'NO_WS';
                 console.warn(`[HumanMediaBridge] Cannot send to WS — state: ${wsState} (ws null: ${!session.ws})`);
             }
+
+            // Store for per-speaker transcription (caller side)
+            session.callerChunks.push(audioMuLaw);
         };
 
         sipService.on('audio_in', audioInHandler);
@@ -136,10 +142,6 @@ class HumanMediaBridge {
         const { ws, sipService, sipCallId, internalCallId } = session;
 
         ws.on('message', (message) => {
-            // Assume the message is a raw buffer of mu-law audio
-            // from the frontend microphone. 
-            // In the frontend useManualCall, we'll convert microphone to 8kHz mu-law and send it via WS.
-            
             if (Buffer.isBuffer(message)) {
                 session.wsPacketCount++;
                 
@@ -147,8 +149,11 @@ class HumanMediaBridge {
                     console.log(`[HumanMediaBridge] WS Audio in: packet #${session.wsPacketCount}, bytes: ${message.length}`);
                 }
 
-                // Record the agent's audio
+                // Record the agent's audio (mixed WAV)
                 this.recordingService.addAudioChunk(internalCallId, message, 'agent');
+
+                // Store for per-speaker transcription (agent side)
+                session.agentChunks.push(message);
 
                 // Send to SIP
                 sipService.sendAudio(sipCallId, message);
@@ -220,9 +225,12 @@ class HumanMediaBridge {
                 statusClassification: 'unknown'
             };
 
-            // Post-call Transcribe + Summary
-            if (recordingUrl) {
-                 callInfo = await this.analyzeRecording(recordingUrl);
+            // Post-call Transcribe + Summary (using separate per-speaker audio tracks)
+            if (session.callerChunks.length > 0 || session.agentChunks.length > 0) {
+                callInfo = await this.transcribeSeparateTracks(session.callerChunks, session.agentChunks);
+            } else if (recordingUrl) {
+                // Fallback: transcribe mixed WAV if no chunks (shouldn't happen in normal flow)
+                callInfo = await this.analyzeRecording(recordingUrl);
             }
 
             // Update call DB
@@ -237,7 +245,8 @@ class HumanMediaBridge {
                         recordingUrl: recordingUrl || undefined,
                         summary: callInfo.summary,
                         leadStatus: callInfo.leadStatus,
-                        transcript: callInfo.transcript
+                        transcript: callInfo.transcript,
+                        messages: callInfo.messages || []
                     },
                     { upsert: false }
                 );
@@ -283,50 +292,143 @@ class HumanMediaBridge {
         }
     }
 
-    async analyzeRecording(recordingUrl) {
+    /**
+     * Build a raw PCMU WAV buffer from an array of mu-law chunk Buffers
+     */
+    _buildPcmuWav(chunks) {
+        const pcmuData = Buffer.concat(chunks);
+        const dataLen = pcmuData.length;
+        // WAV header for MULAW (format 7): fmt chunk is 18 bytes (includes extra byte count)
+        const header = Buffer.alloc(46);
+        header.write('RIFF', 0);
+        header.writeUInt32LE(38 + dataLen, 4);   // file size - 8
+        header.write('WAVE', 8);
+        header.write('fmt ', 12);
+        header.writeUInt32LE(18, 16);             // fmt chunk size (18 for MULAW)
+        header.writeUInt16LE(7, 20);              // Audio format: 7 = MULAW
+        header.writeUInt16LE(1, 22);              // Channels: 1
+        header.writeUInt32LE(8000, 24);           // Sample rate: 8000 Hz
+        header.writeUInt32LE(8000, 28);           // Byte rate: 8000 * 1 * 1
+        header.writeUInt16LE(1, 32);              // Block align: 1
+        header.writeUInt16LE(8, 34);              // Bits per sample: 8
+        header.writeUInt16LE(0, 36);              // Extra param bytes for MULAW
+        header.write('data', 38);
+        header.writeUInt32LE(dataLen, 42);
+        return Buffer.concat([header, pcmuData]);
+    }
+
+    /**
+     * Transcribe caller + agent tracks separately via Deepgram, merge by word timestamps,
+     * and return structured messages array alongside combined transcript and summary.
+     */
+    async transcribeSeparateTracks(callerChunks, agentChunks) {
         try {
             const DeepgramService = require('./deepgram.service');
             const dgService = new DeepgramService(process.env.DEEPGRAM_API_KEY);
-            
-            console.log(`[HumanMediaBridge] Fetching recording for transcription: ${recordingUrl}`);
-            const axios = require('axios');
-            const audioData = await axios.get(recordingUrl, { responseType: 'arraybuffer' });
-            
-            const transcript = await dgService.transcribeFile(audioData.data, { language: 'hi' });
-            console.log(`[HumanMediaBridge] Full call transcript: ${transcript}`);
 
-            if (!transcript) {
-                return { summary: 'No speech detected.', leadStatus: 'unknown', leadType: 'unknown', leadProfile: 'unknown', statusClassification: 'unknown' };
+            console.log(`[HumanMediaBridge] Transcribing separate tracks: caller=${callerChunks.length} chunks, agent=${agentChunks.length} chunks`);
+
+            const opts = { language: 'hi', words: true };
+
+            // Run both transcriptions in parallel
+            const [callerResult, agentResult] = await Promise.all([
+                callerChunks.length > 0
+                    ? dgService.transcribeWithWords(this._buildPcmuWav(callerChunks), opts)
+                    : Promise.resolve({ transcript: '', words: [] }),
+                agentChunks.length > 0
+                    ? dgService.transcribeWithWords(this._buildPcmuWav(agentChunks), opts)
+                    : Promise.resolve({ transcript: '', words: [] })
+            ]);
+
+            console.log(`[HumanMediaBridge] Caller transcript: ${callerResult.transcript}`);
+            console.log(`[HumanMediaBridge] Agent transcript:  ${agentResult.transcript}`);
+
+            // Tag each word with its speaker role
+            const callerWords = callerResult.words.map(w => ({ ...w, role: 'customer' }));
+            const agentWords  = agentResult.words.map(w => ({ ...w, role: 'agent' }));
+
+            // Merge and sort by start time
+            const allWords = [...callerWords, ...agentWords].sort((a, b) => a.start - b.start);
+
+            // Group consecutive same-speaker words into utterances
+            const messages = [];
+            let current = null;
+            for (const w of allWords) {
+                if (!current || current.role !== w.role) {
+                    if (current) messages.push(current);
+                    current = { role: w.role, text: w.word, timestamp: w.start };
+                } else {
+                    current.text += ' ' + w.word;
+                }
+            }
+            if (current) messages.push(current);
+
+            // Combined flat transcript for Gemini analysis
+            const combinedTranscript = messages
+                .map(m => `${m.role === 'agent' ? 'Agent' : 'Customer'}: ${m.text}`)
+                .join('\n');
+
+            console.log(`[HumanMediaBridge] Merged transcript:\n${combinedTranscript}`);
+
+            if (!combinedTranscript.trim()) {
+                return { summary: 'No speech detected.', leadStatus: 'unknown', leadType: 'unknown', leadProfile: 'unknown', statusClassification: 'unknown', transcript: '', messages: [] };
             }
 
+            // Gemini analysis on the merged structured transcript
             const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
             const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-            
+
             const prompt = `
-                Analyze this phone call transcript (which may contain both the human agent and the customer talking). 
-                Return ONLY a JSON object with:
-                "leadType": "Hot", "Warm", or "Cold".
-                "leadProfile": Professions or demographic (e.g. "Doctor").
-                "statusClassification": "Interested", "Not Interested", "Follow-up", etc.
-                "summary": 1-2 sentence recap.
-                
-                Transcript:
-                ${transcript}
+Analyze this phone call transcript (speaker-labeled). 
+Return ONLY a JSON object with:
+"leadType": "Hot", "Warm", or "Cold".
+"leadProfile": Profession or demographic (e.g. "Doctor").
+"statusClassification": "Interested", "Not Interested", "Follow-up", etc.
+"summary": 1-2 sentence recap.
+
+Transcript:
+${combinedTranscript}
             `;
             const result = await model.generateContent(prompt);
             const text = result.response.text().replace(/\`\`\`json/g, '').replace(/\`\`\`/g, '').trim();
             const parsed = JSON.parse(text);
-            return { ...parsed, transcript };
+
+            return { ...parsed, transcript: combinedTranscript, messages };
         } catch (error) {
-            console.error(`[HumanMediaBridge] Error analyzing recording:`, error);
+            console.error(`[HumanMediaBridge] Error in transcribeSeparateTracks:`, error);
             return {
-                transcript: transcript,
+                transcript: '',
+                messages: [],
                 summary: 'Analysis failed',
                 leadStatus: 'unknown',
                 leadType: 'unknown',
                 leadProfile: 'unknown',
                 statusClassification: 'unknown'
             };
+        }
+    }
+
+    // Legacy: transcribe mixed WAV (fallback)
+    async analyzeRecording(recordingUrl) {
+        try {
+            const DeepgramService = require('./deepgram.service');
+            const dgService = new DeepgramService(process.env.DEEPGRAM_API_KEY);
+            const axios = require('axios');
+            const audioData = await axios.get(recordingUrl, { responseType: 'arraybuffer' });
+            const transcript = await dgService.transcribeFile(audioData.data, { language: 'hi' });
+            if (!transcript) {
+                return { summary: 'No speech detected.', leadStatus: 'unknown', leadType: 'unknown', leadProfile: 'unknown', statusClassification: 'unknown' };
+            }
+            const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+            const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+            const prompt = `Analyze this phone call transcript. Return ONLY a JSON object with: "leadType", "leadProfile", "statusClassification", "summary". Transcript: ${transcript}`;
+            const result = await model.generateContent(prompt);
+            const text = result.response.text().replace(/\`\`\`json/g, '').replace(/\`\`\`/g, '').trim();
+            const parsed = JSON.parse(text);
+            return { ...parsed, transcript, messages: [] };
+        } catch (error) {
+            console.error(`[HumanMediaBridge] Error analyzing recording:`, error);
+            return { transcript: '', messages: [], summary: 'Analysis failed', leadStatus: 'unknown', leadType: 'unknown', leadProfile: 'unknown', statusClassification: 'unknown' };
         }
     }
 
