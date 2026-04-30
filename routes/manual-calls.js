@@ -44,18 +44,17 @@ router.post('/start', authenticate, async (req, res) => {
         const internalCallId = new mongoose.Types.ObjectId().toString();
         const humanMediaBridge = getHumanMediaBridge();
 
-        // Register answered event
-        sipService.on('answered', async ({ callId, internalCallId: iCallId }) => {
-            // Wait for WebSocket to connect and send init.
-            // Actually, we should initialize the bridge session so it's ready.
-            // Oh wait, startSession requires a 'ws' object. 
-            // In a manual call, the frontend calls '/start', gets the internalCallId, 
-            // and immediately opens a WebSocket sending {event: "init", internalCallId}.
-            // When SIP answers, it might be BEFORE or AFTER WS connects.
-            
-            // Wait, we can modify HumanMediaBridge to just track the sipService and wait for ws.
-            // Let's refactor that a bit inside HumanMediaBridge.
-            console.log(`[ManualCall] SIP Answered for ${iCallId}`);
+        // Register answered event — initialize the bridge session so audio_in listener is active
+        sipService.on('answered', async ({ callId: sipCallId, internalCallId: iCallId }) => {
+            console.log(`[ManualCall] SIP Answered for ${iCallId}, starting HumanMediaBridge session`);
+            try {
+                // startSession sets up the audio_in handler (SIP → WS).
+                // WS is null here — it will be attached later via attachWebSocket() when the
+                // frontend opens the WebSocket and sends the init frame.
+                await humanMediaBridge.startSession(iCallId, sipService, sipCallId, null);
+            } catch (err) {
+                console.error('[ManualCall] Failed to start HumanMediaBridge session:', err);
+            }
         });
 
         sipService.on('ended', async ({ callId, internalCallId: iCallId }) => {

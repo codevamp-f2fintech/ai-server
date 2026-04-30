@@ -780,9 +780,33 @@ class SipTrunkService extends EventEmitter {
                 // Handle incoming SIP requests (BYE, re-INVITE, etc.)
                 if (response.isRequest) {
                     if (response.method === 'BYE') {
-                        // Only process BYE once
+                        // Helper: extract actual sender from top Via header and send 200 OK.
+                        // MUST use received=/rport= from Via, not this.serverIp —
+                        // otherwise Twilio never receives the 200 OK and retransmits BYE endlessly.
+                        const sendByeOk = () => {
+                            const viaStr = response.headers?.via || '';
+                            const receivedMatch = viaStr.match(/received=([\d.]+)/);
+                            const rportMatch    = viaStr.match(/rport=(\d+)/);
+                            const byeSrcIp   = receivedMatch ? receivedMatch[1] : this.serverIp;
+                            const byeSrcPort = rportMatch   ? parseInt(rportMatch[1]) : this.port;
+                            const okResponse =
+                                `SIP/2.0 200 OK\r\n` +
+                                `Via: ${viaStr}\r\n` +
+                                `From: ${response.headers?.from || ''}\r\n` +
+                                `To: ${response.headers?.to || ''}\r\n` +
+                                `Call-ID: ${response.headers?.['call-id'] || callId}\r\n` +
+                                `CSeq: ${response.headers?.cseq || '1 BYE'}\r\n` +
+                                `Content-Length: 0\r\n\r\n`;
+                            socket.send(Buffer.from(okResponse), byeSrcPort, byeSrcIp);
+                            console.log(`[SipTrunk] Sent 200 OK for BYE to ${byeSrcIp}:${byeSrcPort}`);
+                        };
+
+                        // Always send 200 OK (even on retransmissions) so Twilio stops retransmitting.
+                        sendByeOk();
+
                         if (callData.byeReceived) {
-                            return; // Silently ignore duplicate BYE
+                            console.log('[SipTrunk] BYE retransmit — 200 OK resent, ignoring duplicate');
+                            return; // Don't re-emit ended
                         }
                         callData.byeReceived = true;
                         callData.callEnded = true; // Stop sendAudio from queuing more packets
@@ -804,17 +828,7 @@ class SipTrunkService extends EventEmitter {
                             callData.audioQueue = [];
                         }
 
-                        // Send 200 OK response to BYE
-                        const okResponse = `SIP/2.0 200 OK\r\n` +
-                            `Via: ${response.headers?.via || ''}\r\n` +
-                            `From: ${response.headers?.from || ''}\r\n` +
-                            `To: ${response.headers?.to || ''}\r\n` +
-                            `Call-ID: ${response.headers?.['call-id'] || callId}\r\n` +
-                            `CSeq: ${response.headers?.cseq || '1 BYE'}\r\n` +
-                            `Content-Length: 0\r\n\r\n`;
-                        socket.send(Buffer.from(okResponse), this.port, this.serverIp);
-
-                        // Emit call ended event (matches listener in independent-calls.js)
+                        // Emit call ended event
                         this.emit('ended', { callId, internalCallId, reason: 'remote_hangup' });
                         return;
                     } else if (response.method === 'ACK') {
