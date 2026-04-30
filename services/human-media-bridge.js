@@ -105,8 +105,15 @@ class HumanMediaBridge {
 
             // Send to WebSocket (as raw mu-law base64 string or binary)
             if (session.ws && session.ws.readyState === 1) { // WebSocket.OPEN
-                // Send as binary
                 session.ws.send(audioMuLaw);
+                session.wsSendCount = (session.wsSendCount || 0) + 1;
+                if (session.wsSendCount === 1 || session.wsSendCount % 200 === 0) {
+                    console.log(`[HumanMediaBridge] Sent audio to WS: packet #${session.wsSendCount}, bytes: ${audioMuLaw.length}`);
+                }
+            } else if (session.audioPacketCount % 100 === 0) {
+                // Log why audio isn't being sent
+                const wsState = session.ws ? session.ws.readyState : 'NO_WS';
+                console.warn(`[HumanMediaBridge] Cannot send to WS — state: ${wsState} (ws null: ${!session.ws})`);
             }
         };
 
