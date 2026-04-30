@@ -7,10 +7,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'vani-voice-ai-secret-key-change-in
 
 class ManualCallServer {
     constructor(server) {
-        this.wss = new WebSocket.Server({
-            server,
-            path: '/ws/manual-call'
-        });
+        // When server is null, use noServer:true so server.js can dispatch
+        // upgrade events manually (avoids conflict between multiple WS servers).
+        this.wss = new WebSocket.Server(
+            server ? { server, path: '/ws/manual-call' } : { noServer: true }
+        );
 
         this.bridge = getHumanMediaBridge();
         this.setupWebSocketServer();

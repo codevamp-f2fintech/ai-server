@@ -9,10 +9,11 @@ const Agent = require('../models/Agent');
 
 class MediaStreamServer {
     constructor(server) {
-        this.wss = new WebSocket.Server({
-            server,
-            path: '/ws/media-stream'
-        });
+        // When server is null, use noServer:true so server.js can dispatch
+        // upgrade events manually (avoids conflict between multiple WS servers).
+        this.wss = new WebSocket.Server(
+            server ? { server, path: '/ws/media-stream' } : { noServer: true }
+        );
 
         this.twilioService = new TwilioService(
             process.env.TWILIO_ACCOUNT_SID,

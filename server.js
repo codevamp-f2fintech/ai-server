@@ -390,15 +390,37 @@ const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
   console.log(`Listening on ${PORT}`);
 
-  // Initialize WebSocket Media Stream Server
-  const MediaStreamServer = require('./websocket/media-stream.server');
-  const mediaStreamServer = new MediaStreamServer(server);
-  console.log('WebSocket Media Stream Server initialized');
+  // ── WebSocket routing ──────────────────────────────────────────────────────
+  // The ws library conflicts when multiple WebSocket.Server instances register
+  // 'upgrade' handlers on the same http.Server.  Fix: use noServer:true for
+  // both, then manually dispatch upgrade events by URL path.
+  const WebSocket = require('ws');
 
-  // Initialize WebSocket Manual Call Server
-  const ManualCallServer = require('./websocket/manual-call.server');
-  const manualCallServer = new ManualCallServer(server);
-  console.log('WebSocket Manual Call Server initialized');
+  const MediaStreamServer = require('./websocket/media-stream.server');
+  const ManualCallServer  = require('./websocket/manual-call.server');
+
+  const mediaStreamServer = new MediaStreamServer(null);   // noServer mode
+  const manualCallServer  = new ManualCallServer(null);    // noServer mode
+
+  server.on('upgrade', (request, socket, head) => {
+    const { pathname } = new URL(request.url, `http://${request.headers.host}`);
+    console.log(`[WS Router] Upgrade request for path: ${pathname}`);
+
+    if (pathname === '/ws/media-stream') {
+      mediaStreamServer.wss.handleUpgrade(request, socket, head, (ws) => {
+        mediaStreamServer.wss.emit('connection', ws, request);
+      });
+    } else if (pathname === '/ws/manual-call') {
+      manualCallServer.wss.handleUpgrade(request, socket, head, (ws) => {
+        manualCallServer.wss.emit('connection', ws, request);
+      });
+    } else {
+      console.warn(`[WS Router] Unknown WS path: ${pathname}, destroying socket`);
+      socket.destroy();
+    }
+  });
+
+  console.log('WebSocket servers initialized (media-stream + manual-call)');
 
   // Start Background Campaign Queue Processor
   const { startProcessor } = require('./services/campaign.processor');
