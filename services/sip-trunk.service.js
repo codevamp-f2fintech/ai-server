@@ -472,9 +472,31 @@ class SipTrunkService extends EventEmitter {
         const ha2 = crypto.createHash('md5')
             .update(`INVITE:${uri}`)
             .digest('hex');
-        const response = crypto.createHash('md5')
-            .update(`${ha1}:${authParams.nonce}:${ha2}`)
-            .digest('hex');
+
+        let responseStr;
+        let authHeader;
+        
+        if (authParams.qop === 'auth') {
+            const cnonce = crypto.randomBytes(8).toString('hex');
+            const nc = '00000001';
+            responseStr = crypto.createHash('md5')
+                .update(`${ha1}:${authParams.nonce}:${nc}:${cnonce}:${authParams.qop}:${ha2}`)
+                .digest('hex');
+            
+            authHeader = `Digest username="${this.username}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${responseStr}", algorithm=MD5, qop=${authParams.qop}, nc=${nc}, cnonce="${cnonce}"`;
+        } else {
+            responseStr = crypto.createHash('md5')
+                .update(`${ha1}:${authParams.nonce}:${ha2}`)
+                .digest('hex');
+            
+            authHeader = `Digest username="${this.username}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${responseStr}", algorithm=MD5`;
+        }
+        
+        if (authParams.opaque) {
+            authHeader += `, opaque="${authParams.opaque}"`;
+        }
+
+        const authHeaderName = authParams.isProxy ? 'Proxy-Authorization' : 'Authorization';
 
         // SDP for audio
         const sdp = [
@@ -490,9 +512,6 @@ class SipTrunkService extends EventEmitter {
             'a=sendrecv',
             ''
         ].join('\r\n');
-
-        const authHeader = `Digest username="${this.username}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${response}", algorithm=MD5`;
-        const authHeaderName = authParams.isProxy ? 'Proxy-Authorization' : 'Authorization';
 
         const sipRequest = [
             `INVITE ${uri} SIP/2.0`,
@@ -582,6 +601,12 @@ class SipTrunkService extends EventEmitter {
 
             const nonceMatch = authHeaderStr.match(/nonce="([^"]+)"/);
             if (nonceMatch) response.authParams.nonce = nonceMatch[1];
+
+            const qopMatch = authHeaderStr.match(/qop="([^"]+)"/);
+            if (qopMatch) response.authParams.qop = qopMatch[1];
+
+            const opaqueMatch = authHeaderStr.match(/opaque="([^"]+)"/);
+            if (opaqueMatch) response.authParams.opaque = opaqueMatch[1];
         }
 
         // Parse To tag
