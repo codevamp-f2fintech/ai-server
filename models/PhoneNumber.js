@@ -67,6 +67,19 @@ const phoneNumberSchema = new mongoose.Schema({
         default: 5060
     },
 
+    // Twilio Elastic SIP Trunk: Credential List credentials for Digest authentication.
+    // These are SEPARATE from sipUsername (which is the SIP identity in From/Contact headers).
+    // Go to Twilio Console → Elastic SIP Trunking → your trunk → Termination → Credential Lists
+    // to find/create the credential username & password.
+    // If left blank, falls back to sipUsername/sipPassword.
+    sipAuthUsername: {
+        type: String
+    },
+    sipAuthPassword: {
+        type: String
+        // TODO: Encrypt this field in production
+    },
+
     // Legacy fields (kept for backward compatibility)
     sipUri: String,
     sipAuthentication: {
@@ -130,6 +143,9 @@ phoneNumberSchema.methods.getSipTrunkCredentials = function () {
         serverIp: this.sipServerIp,
         username: this.sipUsername,
         password: this.sipPassword,
+        // Return Credential List credentials if set, otherwise fall back
+        authUsername: this.sipAuthUsername || this.sipUsername,
+        authPassword: this.sipAuthPassword || this.sipPassword,
         port: this.sipPort || 5060,
         phoneNumber: this.number
     };

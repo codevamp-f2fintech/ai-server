@@ -134,7 +134,7 @@ router.post('/twilio', async (req, res) => {
  */
 router.post('/sip-trunk', async (req, res) => {
     try {
-        const { number, name, serverIp, username, password, port } = req.body;
+        const { number, name, serverIp, username, password, port, authUsername, authPassword } = req.body;
 
         if (!number || !serverIp || !username || !password) {
             return res.status(400).json({
@@ -151,6 +151,10 @@ router.post('/sip-trunk', async (req, res) => {
             sipServerIp: serverIp,
             sipUsername: username,
             sipPassword: password,
+            // Twilio Credential List credentials (optional, for Twilio Elastic SIP Trunks).
+            // If not provided, falls back to username/password for Digest auth.
+            sipAuthUsername: authUsername || undefined,
+            sipAuthPassword: authPassword || undefined,
             sipPort: port || 5060,
             status: 'active'
         });
@@ -168,6 +172,8 @@ router.post('/sip-trunk', async (req, res) => {
                 provider: phoneNumber.provider,
                 sipServerIp: phoneNumber.sipServerIp,
                 sipPort: phoneNumber.sipPort,
+                // Inform caller whether separate auth credentials were saved
+                hasSipAuthCredentials: !!(phoneNumber.sipAuthUsername),
                 status: phoneNumber.status,
                 createdAt: phoneNumber.createdAt
             }

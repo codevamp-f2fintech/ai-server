@@ -62,10 +62,18 @@ class SipTrunkService extends EventEmitter {
     constructor(config) {
         super();
         this.serverIp = config.serverIp;
-        this.username = config.username;
+        this.username = config.username;   // SIP identity (used in From/Contact headers)
         this.password = config.password;
         this.port = config.port || 5060;
         this.fromNumber = config.fromNumber;
+
+        // Twilio Credential List credentials (used for Digest authentication).
+        // For Twilio Elastic SIP Trunks, the Digest auth username/password must match
+        // what is configured in the Credential List attached to the trunk — NOT the
+        // SIP identity (extension) in the From header.
+        // If not supplied separately, fall back to the SIP identity credentials.
+        this.authUsername = config.authUsername || config.username;
+        this.authPassword = config.authPassword || config.password;
 
         // Local port for SIP signaling
         this.localSipPort = 5060;
@@ -84,6 +92,7 @@ class SipTrunkService extends EventEmitter {
         this.localIp = null;
 
         console.log(`[SipTrunkService] Initialized for ${this.serverIp}:${this.port}`);
+        console.log(`[SipTrunkService] SIP identity: ${this.username}, Auth username: ${this.authUsername}`);
     }
 
     /**
@@ -194,9 +203,9 @@ class SipTrunkService extends EventEmitter {
         const toUri = `sip:${this.username}@${this.serverIp}`;
         const branch = this.generateBranch();
 
-        // Calculate Digest response
+        // Use authUsername/authPassword for Digest (Twilio Credential List credentials)
         const ha1 = crypto.createHash('md5')
-            .update(`${this.username}:${authParams.realm}:${this.password}`)
+            .update(`${this.authUsername}:${authParams.realm}:${this.authPassword}`)
             .digest('hex');
         const ha2 = crypto.createHash('md5')
             .update(`REGISTER:${uri}`)
@@ -205,7 +214,7 @@ class SipTrunkService extends EventEmitter {
             .update(`${ha1}:${authParams.nonce}:${ha2}`)
             .digest('hex');
 
-        const authHeader = `Digest username="${this.username}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${response}", algorithm=MD5`;
+        const authHeader = `Digest username="${this.authUsername}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${response}", algorithm=MD5`;
 
         return [
             `REGISTER ${uri} SIP/2.0`,
@@ -301,12 +310,17 @@ class SipTrunkService extends EventEmitter {
      * @param {number} localSipPort - The actual local SIP port (ephemeral or bound)
      */
     createInviteRequest(toNumber, callId, fromTag, cseq, localIp, rtpPort, localSipPort = 5060) {
-        // Clean phone numbers - remove + and country code (91 for India) to match MicroSIP format
-        // MicroSIP uses 10-digit format like 8267818161
-        let cleanTo = toNumber.replace(/^\+/, '');
-        // Remove 91 country code if present (for India)
-        if (cleanTo.startsWith('91') && cleanTo.length > 10) {
-            cleanTo = cleanTo.substring(2);
+        // Format the destination number for the Request-URI.
+        // Twilio PSTN (Elastic SIP Trunk) requires the full E.164 number WITH country code
+        // e.g. +918267818161 → 918267818161  (just strip the leading +)
+        // Legacy SIP PBX / MicroSIP expects 10-digit local format (strip country code too).
+        const isTwilio = this.serverIp && this.serverIp.toLowerCase().includes('twilio.com');
+        let cleanTo = toNumber.replace(/^\+/, '');   // always strip leading +
+        if (!isTwilio) {
+            // Non-Twilio PBX: strip 91 country code for India numbers
+            if (cleanTo.startsWith('91') && cleanTo.length > 10) {
+                cleanTo = cleanTo.substring(2);
+            }
         }
         const cleanFrom = this.fromNumber.replace(/^\+/, '');
 
@@ -452,11 +466,15 @@ class SipTrunkService extends EventEmitter {
      * @param {number} localSipPort - The actual local SIP port (ephemeral or bound)
      */
     createAuthenticatedInvite(toNumber, callId, fromTag, cseq, localIp, rtpPort, authParams, localSipPort = 5060) {
-        // Clean phone numbers - remove + and country code (91 for India) to match MicroSIP format
-        let cleanTo = toNumber.replace(/^\+/, '');
-        // Remove 91 country code if present (for India)
-        if (cleanTo.startsWith('91') && cleanTo.length > 10) {
-            cleanTo = cleanTo.substring(2);
+        // Format the destination number for the Request-URI — must match createInviteRequest logic.
+        // Twilio PSTN requires full E.164 WITH country code; only strip the leading +.
+        // Non-Twilio PBX: also strip the country code (legacy 10-digit format).
+        const isTwilio = this.serverIp && this.serverIp.toLowerCase().includes('twilio.com');
+        let cleanTo = toNumber.replace(/^\+/, '');   // always strip leading +
+        if (!isTwilio) {
+            if (cleanTo.startsWith('91') && cleanTo.length > 10) {
+                cleanTo = cleanTo.substring(2);
+            }
         }
         const cleanFrom = this.fromNumber.replace(/^\+/, '');
         const uri = `sip:${cleanTo}@${this.serverIp}:${this.port}`;
@@ -465,9 +483,12 @@ class SipTrunkService extends EventEmitter {
         const toUri = `sip:${cleanTo}@${this.serverIp}`;
         const branch = this.generateBranch();
 
-        // Calculate Digest response
+        // Use authUsername/authPassword for Digest (Twilio Credential List credentials).
+        // IMPORTANT: For Twilio Elastic SIP Trunks, 'username' in Proxy-Authorization
+        // must match the username in the Credential List attached to the trunk,
+        // NOT the SIP identity/extension used in the From header.
         const ha1 = crypto.createHash('md5')
-            .update(`${this.username}:${authParams.realm}:${this.password}`)
+            .update(`${this.authUsername}:${authParams.realm}:${this.authPassword}`)
             .digest('hex');
         const ha2 = crypto.createHash('md5')
             .update(`INVITE:${uri}`)
@@ -483,13 +504,13 @@ class SipTrunkService extends EventEmitter {
                 .update(`${ha1}:${authParams.nonce}:${nc}:${cnonce}:${authParams.qop}:${ha2}`)
                 .digest('hex');
             
-            authHeader = `Digest username="${this.username}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${responseStr}", algorithm=MD5, qop=${authParams.qop}, nc=${nc}, cnonce="${cnonce}"`;
+            authHeader = `Digest username="${this.authUsername}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${responseStr}", algorithm=MD5, qop=${authParams.qop}, nc=${nc}, cnonce="${cnonce}"`;
         } else {
             responseStr = crypto.createHash('md5')
                 .update(`${ha1}:${authParams.nonce}:${ha2}`)
                 .digest('hex');
             
-            authHeader = `Digest username="${this.username}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${responseStr}", algorithm=MD5`;
+            authHeader = `Digest username="${this.authUsername}", realm="${authParams.realm}", nonce="${authParams.nonce}", uri="${uri}", response="${responseStr}", algorithm=MD5`;
         }
         
         if (authParams.opaque) {
@@ -1504,8 +1525,12 @@ SipTrunkService.createFromPhoneNumber = function (phoneNumber) {
 
     return new SipTrunkService({
         serverIp: phoneNumber.sipServerIp,
-        username: phoneNumber.sipUsername,
+        username: phoneNumber.sipUsername,           // SIP identity (From/Contact header)
         password: phoneNumber.sipPassword,
+        // Twilio Credential List credentials for Digest auth.
+        // sipAuthUsername/sipAuthPassword take priority; fall back to sipUsername/sipPassword.
+        authUsername: phoneNumber.sipAuthUsername || phoneNumber.sipUsername,
+        authPassword: phoneNumber.sipAuthPassword || phoneNumber.sipPassword,
         port: phoneNumber.sipPort || 5060,
         fromNumber: phoneNumber.number
     });
