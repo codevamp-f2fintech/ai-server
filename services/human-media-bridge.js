@@ -80,7 +80,7 @@ class HumanMediaBridge {
      * Listen to SIP Audio and send to WebSocket
      */
     setupIncomingAudio(session) {
-        const { sipService, internalCallId, sipCallId, ws } = session;
+        const { sipService, internalCallId, sipCallId } = session;
         const alawmulaw = require('alawmulaw');
 
         const audioInHandler = ({ callId, audio, codec }) => {
@@ -104,9 +104,9 @@ class HumanMediaBridge {
             this.recordingService.addAudioChunk(internalCallId, audioMuLaw, 'caller');
 
             // Send to WebSocket (as raw mu-law base64 string or binary)
-            if (ws && ws.readyState === 1) { // WebSocket.OPEN
+            if (session.ws && session.ws.readyState === 1) { // WebSocket.OPEN
                 // Send as binary
-                ws.send(audioMuLaw);
+                session.ws.send(audioMuLaw);
             }
         };
 
@@ -229,7 +229,8 @@ class HumanMediaBridge {
                         durationSeconds: Math.round(duration),
                         recordingUrl: recordingUrl || undefined,
                         summary: callInfo.summary,
-                        leadStatus: callInfo.leadStatus
+                        leadStatus: callInfo.leadStatus,
+                        transcript: callInfo.transcript
                     },
                     { upsert: false }
                 );
@@ -292,7 +293,7 @@ class HumanMediaBridge {
             }
 
             const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-            const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+            const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
             
             const prompt = `
                 Analyze this phone call transcript (which may contain both the human agent and the customer talking). 
@@ -307,10 +308,12 @@ class HumanMediaBridge {
             `;
             const result = await model.generateContent(prompt);
             const text = result.response.text().replace(/\`\`\`json/g, '').replace(/\`\`\`/g, '').trim();
-            return JSON.parse(text);
+            const parsed = JSON.parse(text);
+            return { ...parsed, transcript };
         } catch (error) {
             console.error(`[HumanMediaBridge] Error analyzing recording:`, error);
             return {
+                transcript: transcript,
                 summary: 'Analysis failed',
                 leadStatus: 'unknown',
                 leadType: 'unknown',
