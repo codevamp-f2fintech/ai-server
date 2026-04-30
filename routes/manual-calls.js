@@ -64,16 +64,11 @@ router.post('/start', authenticate, async (req, res) => {
         // Make call via SIP trunk
         const call = await sipService.makeCall(to, internalCallId);
 
-        // Pre-register the session in bridge so websocket can attach to it
-        humanMediaBridge.activeSessions.set(internalCallId, {
-            internalCallId,
-            sipCallId: call.sipCallId,
-            sipService,
-            ws: null, // Will be set when WS connects
-            startTime: Date.now(),
-            audioPacketCount: 0,
-            wsPacketCount: 0
-        });
+        // NOTE: Do NOT pre-register the session here.
+        // The 'answered' event fires BEFORE makeCall() resolves and calls startSession(),
+        // which correctly creates the session in activeSessions.
+        // Pre-registering here would OVERWRITE that session, breaking the audio handler reference.
+
 
         // Save call to database
         const callRecord = new Call({
